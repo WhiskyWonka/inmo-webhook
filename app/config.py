@@ -5,4 +5,5 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     verify_token: str = ""
+    app_secret: str = ""
     leads_log_path: str = "/app/data/leads.log"

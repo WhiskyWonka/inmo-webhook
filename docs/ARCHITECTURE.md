@@ -14,7 +14,8 @@ main.py (composition root)
    └── app/web.py             ← FastAPI handlers + create_app()
    └── app/domain/            ← Pure business logic (no framework imports)
    │     ├── verification.py
-   │     └── messages.py
+   │     ├── messages.py
+   │     └── signature.py
    └── app/storage/           ← Persistence adapters
          └── lead_log.py
 ```
@@ -55,6 +56,7 @@ Each module has one reason to change:
 - `config.py` → changes only when env vars change
 - `domain/verification.py` → changes only when Meta webhook handshake spec changes
 - `domain/messages.py` → changes only when Meta payload format changes
+- `domain/signature.py` → changes only when Meta signature spec changes
 - `storage/lead_log.py` → changes only when persistence format changes
 - `web.py` → changes only when HTTP routing/wiring changes
 
@@ -176,6 +178,22 @@ pytest -q                        # Quiet mode
 
 ---
 
+## Request Signature Verification
+
+`POST /webhook` verifies the `X-Hub-Signature-256` header before processing
+the payload, using the `app_secret` (env `APP_SECRET`).
+
+**Critical rule:** the HMAC-SHA256 signature must be computed over the
+**raw request body bytes** exactly as they arrived (`await request.body()`),
+then parsed to JSON afterwards. Never re-serialize JSON (with
+`json.dumps` or `await request.json()`) before verifying — JSON re-serialization
+can change key order, whitespace, or unicode escaping and break the digest.
+This keeps the service compatible with both the real Meta WhatsApp Cloud API
+and the `whap` mock, which signs the exact bytes it transmits (escaping
+non-ASCII as `\uXXXX`, matching Meta).
+
+---
+
 ## File Map
 
 ```
@@ -186,12 +204,14 @@ app/web.py                       → FastAPI create_app + handlers
 app/domain/__init__.py           → Package marker (empty)
 app/domain/verification.py       → Webhook handshake validation
 app/domain/messages.py           → Lead dataclass + payload parser
+app/domain/signature.py          → HMAC-SHA256 X-Hub-Signature-256 verification
 app/storage/__init__.py          → Package marker (empty)
 app/storage/lead_log.py          → Append-only log store
 tests/__init__.py                → Package marker (empty)
 tests/unit/__init__.py           → Package marker (empty)
 tests/unit/test_verification.py  → 6 domain tests
 tests/unit/test_messages.py      → 6 parser tests
+tests/unit/test_signature.py     → signature verification tests
 tests/integration/__init__.py    → Package marker (empty)
-tests/integration/test_webhook.py → 7 HTTP handler tests
+tests/integration/test_webhook.py → HTTP handler tests (GET handshake + POST signed)
 ```

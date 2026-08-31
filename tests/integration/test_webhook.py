@@ -4,6 +4,9 @@ Uses TestClient against the real app. Settings are injected directly —
 no importlib.reload, no monkeypatch.setenv.
 """
 
+import hashlib
+import hmac
+import json
 import re
 
 import pytest
@@ -14,6 +17,7 @@ from app.storage.lead_log import LeadLogStore
 from app.web import create_app
 
 VALID_TOKEN = "test_token"
+APP_SECRET = "test-app-secret"
 
 WHATSAPP_PAYLOAD = {
     "object": "whatsapp_business_account",
@@ -36,11 +40,26 @@ WHATSAPP_PAYLOAD = {
 }
 
 
+def _sign(body: bytes, secret: str = APP_SECRET) -> str:
+    """Return the X-Hub-Signature-256 value for a raw body."""
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+def _signed_post(tc: TestClient, payload: dict, secret: str = APP_SECRET):
+    """Post a payload signed with HMAC-SHA256, using the compact body bytes."""
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    headers = {"X-Hub-Signature-256": _sign(body, secret)}
+    return tc.post("/webhook", content=body, headers=headers)
+
+
 @pytest.fixture
 def client(tmp_path):
     """Return a TestClient wired to a per-test log path and verify token."""
     log_file = tmp_path / "leads.log"
-    settings = Settings(verify_token=VALID_TOKEN, leads_log_path=str(log_file))
+    settings = Settings(
+        verify_token=VALID_TOKEN, app_secret=APP_SECRET, leads_log_path=str(log_file)
+    )
     store = LeadLogStore(settings.leads_log_path)
     app = create_app(settings, store)
     tc = TestClient(app)
@@ -101,12 +120,16 @@ def test_post_uses_injected_store_backend(tmp_path):
         def write(self, lead: Lead) -> None:
             self.written.append(lead)
 
-    settings = Settings(verify_token=VALID_TOKEN, leads_log_path=str(tmp_path / "x.log"))
+    settings = Settings(
+        verify_token=VALID_TOKEN,
+        app_secret=APP_SECRET,
+        leads_log_path=str(tmp_path / "x.log"),
+    )
     fake = FakeStore()
     app = create_app(settings, fake)
     tc = TestClient(app)
 
-    response = tc.post("/webhook", json=WHATSAPP_PAYLOAD)
+    response = _signed_post(tc, WHATSAPP_PAYLOAD)
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     assert len(fake.written) == 1
@@ -116,7 +139,7 @@ def test_post_uses_injected_store_backend(tmp_path):
 
 def test_post_valid_payload_writes_log_line(client):
     """POST /webhook with a WhatsApp payload writes one formatted log line."""
-    response = client.post("/webhook", json=WHATSAPP_PAYLOAD)
+    response = _signed_post(client, WHATSAPP_PAYLOAD)
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
@@ -131,7 +154,7 @@ def test_post_valid_payload_writes_log_line(client):
 
 def test_post_unrelated_payload_writes_no_log(client):
     """POST /webhook with a non-WhatsApp object is ignored, log stays empty."""
-    response = client.post("/webhook", json={"object": "something_else"})
+    response = _signed_post(client, {"object": "something_else"})
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     assert not client.log_file.exists()
@@ -157,7 +180,7 @@ def test_post_multiple_messages_writes_all_log_lines(client):
         ],
     }
 
-    response = client.post("/webhook", json=payload)
+    response = _signed_post(client, payload)
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
@@ -165,6 +188,52 @@ def test_post_multiple_messages_writes_all_log_lines(client):
     assert len(lines) == 2
     assert lines[0].endswith("| 16315551181 | first")
     assert lines[1].endswith("| 5491100001111 | second")
+
+
+def test_post_missing_signature_returns_403(client):
+    """POST /webhook without X-Hub-Signature-256 is rejected with 403."""
+    body = json.dumps(WHATSAPP_PAYLOAD, separators=(",", ":")).encode("utf-8")
+    response = client.post("/webhook", content=body)
+    assert response.status_code == 403
+    assert response.text == ""
+
+
+def test_post_bad_signature_returns_403(client):
+    """POST /webhook with an invalid signature is rejected with 403."""
+    body = json.dumps(WHATSAPP_PAYLOAD, separators=(",", ":")).encode("utf-8")
+    response = client.post(
+        "/webhook",
+        content=body,
+        headers={"X-Hub-Signature-256": _sign(body, "wrong-secret")},
+    )
+    assert response.status_code == 403
+    assert response.text == ""
+
+
+def test_post_tampered_body_returns_403(client):
+    """POST /webhook whose body was altered after signing is rejected with 403."""
+    valid_body = json.dumps(WHATSAPP_PAYLOAD, separators=(",", ":")).encode("utf-8")
+    signature = _sign(valid_body)
+    tampered_body = valid_body.replace(b"this is a text message", b"tampered!")
+    response = client.post(
+        "/webhook",
+        content=tampered_body,
+        headers={"X-Hub-Signature-256": signature},
+    )
+    assert response.status_code == 403
+    assert response.text == ""
+
+
+def test_post_invalid_json_with_valid_signature_returns_400(client):
+    """A signed non-JSON body is rejected with 400 (no crash)."""
+    body = b"not-json"
+    response = client.post(
+        "/webhook",
+        content=body,
+        headers={"X-Hub-Signature-256": _sign(body)},
+    )
+    assert response.status_code == 400
+    assert response.text == ""
 
 
 def test_verify_handshake_missing_challenge_returns_400(client):
