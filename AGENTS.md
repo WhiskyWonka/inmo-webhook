@@ -1,6 +1,6 @@
 # inmo-webhook — Agent Rules
 
-**CRITICAL:** Before making any code changes, read `docs/ARCHITECTURE.md` for the full architecture guide, layer responsibilities, and SOLID analysis.
+**CRITICAL:** Before making any code changes, read `docs/ARCHITECTURE.md` for the full architecture guide, layer responsibilities, and SOLID analysis, and `docs/GITHUB_ISSUES.md` for issue/label conventions.
 
 ---
 
@@ -31,6 +31,8 @@ Add tests that verify the new behavior, and keep unit vs integration split as do
 ## Before You Change Code
 
 - [ ] Read `docs/ARCHITECTURE.md` if this is your first session
+- [ ] Review `docs/GITHUB_ISSUES.md` for issue/label conventions
+- [ ] Is there a GitHub issue backing this work? (no branch/PR without an issue)
 - [ ] Identify which layer your change touches
 - [ ] Verify your imports respect the dependency rules (especially: no concrete store imports in `web.py`)
 - [ ] Confirm the feature satisfies S, O, L, I, D (see SOLID section above)
