@@ -1,5 +1,8 @@
 version: 2
 updates:
+  # Route all Dependabot PRs to develop (GitFlow integration branch), never main.
+  target-branch: "develop"
+
   # Keep GitHub Actions pinned to commit SHAs and up to date (issue #2).
   - package-ecosystem: "github-actions"
     directory: "/"
