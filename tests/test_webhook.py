@@ -88,10 +88,11 @@ def test_post_valid_payload_writes_log_line(client):
     lines = client.log_file.read_text().strip().splitlines()
     assert len(lines) == 1
 
-    line = lines[0]
-    # Timestamp is an ISO 8601 datetime; phone and text match the payload.
-    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", line)
-    assert line.endswith("| 16315551181 | this is a text message")
+    # Timestamp is ISO 8601 (optionally with microseconds), then " | phone | text".
+    ts_part, phone_part, text_part = lines[0].split(" | ")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?", ts_part)
+    assert phone_part == "16315551181"
+    assert text_part == "this is a text message"
 
 
 def test_post_unrelated_payload_writes_no_log(client):
@@ -100,3 +101,55 @@ def test_post_unrelated_payload_writes_no_log(client):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     assert not client.log_file.exists()
+
+
+def test_post_multiple_messages_writes_all_log_lines(client):
+    """POST /webhook with multiple messages writes one line per message."""
+    payload = WHATSAPP_PAYLOAD.copy()
+    payload["entry"][0]["changes"][0]["value"]["messages"] = [
+        {"from": "16315551181", "text": {"body": "first"}},
+        {"from": "5491100001111", "text": {"body": "second"}},
+    ]
+
+    response = client.post("/webhook", json=payload)
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+    lines = client.log_file.read_text().strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0].endswith("| 16315551181 | first")
+    assert lines[1].endswith("| 5491100001111 | second")
+
+
+def test_verify_handshake_missing_challenge_crashes(client):
+    """Regresion-guard: a missing hub.challenge currently crashes the endpoint.
+
+    Documents the *current* buggy behavior (see GitHub issue #1): the endpoint
+    calls int(challenge) without validating that challenge is present, so a
+    missing value raises TypeError. FastAPI's TestClient re-raises the server
+    exception instead of returning a 500, so we assert that the crash happens.
+    When issue #1 is fixed to return a graceful error, this test must change.
+    """
+    with pytest.raises(TypeError):
+        client.get(
+            "/webhook",
+            params={"hub.mode": "subscribe", "hub.verify_token": VALID_TOKEN},
+        )
+
+
+def test_verify_handshake_non_numeric_challenge_crashes(client):
+    """Regresion-guard: a non-numeric hub.challenge currently crashes the endpoint.
+
+    Documents the current buggy behavior (see GitHub issue #1): int('abc') raises
+    ValueError. The TestClient re-raises it rather than returning a 500. When the
+    issue is fixed to return a graceful error, this test must change.
+    """
+    with pytest.raises(ValueError):
+        client.get(
+            "/webhook",
+            params={
+                "hub.mode": "subscribe",
+                "hub.verify_token": VALID_TOKEN,
+                "hub.challenge": "abc",
+            },
+        )
