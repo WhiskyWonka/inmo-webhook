@@ -3,3 +3,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F"]
+
+[tool.pytest.ini_options]
+# Make the repo root importable so `import main` works regardless of how pytest
+# is invoked (local run, `python -m pytest`, or CI from a clean venv).
+pythonpath = ["."]
