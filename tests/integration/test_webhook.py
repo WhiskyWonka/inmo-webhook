@@ -1,35 +1,19 @@
-"""Behavior tests for the FastAPI webhook.
+"""Integration tests for the FastAPI webhook endpoints.
 
-The log file path is bound at module import time (``LEADS_LOG_PATH``), so the
-``client`` fixture sets ``LEADS_LOG_PATH`` and ``VERIFY_TOKEN`` *before*
-reloading ``main`` via ``importlib.reload``. Each test gets its own temporary
-log file through ``tmp_path``, keeping assertions isolated and deterministic.
+Uses TestClient against the real app. Settings are injected directly —
+no importlib.reload, no monkeypatch.setenv.
 """
 
-import importlib
 import re
 
 import pytest
 from fastapi.testclient import TestClient
 
-import main
+from app.config import Settings
+from app.web import create_app
 
+VALID_TOKEN = "test_token"
 
-@pytest.fixture
-def client(monkeypatch, tmp_path):
-    """Return a TestClient wired to a per-test log path and verify token."""
-    log_file = tmp_path / "leads.log"
-    monkeypatch.setenv("LEADS_LOG_PATH", str(log_file))
-    monkeypatch.setenv("VERIFY_TOKEN", "test_verify_token")
-    importlib.reload(main)
-    client = TestClient(main.app)
-    client.log_file = log_file
-    return client
-
-
-VALID_TOKEN = "test_verify_token"
-
-# A realistic Meta / WhatsApp Cloud API payload with a single text message.
 WHATSAPP_PAYLOAD = {
     "object": "whatsapp_business_account",
     "entry": [
@@ -49,6 +33,17 @@ WHATSAPP_PAYLOAD = {
         }
     ],
 }
+
+
+@pytest.fixture
+def client(tmp_path):
+    """Return a TestClient wired to a per-test log path and verify token."""
+    log_file = tmp_path / "leads.log"
+    settings = Settings(verify_token=VALID_TOKEN, leads_log_path=str(log_file))
+    app = create_app(settings)
+    tc = TestClient(app)
+    tc.log_file = log_file
+    return tc
 
 
 def test_verify_handshake_returns_challenge(client):
@@ -88,7 +83,6 @@ def test_post_valid_payload_writes_log_line(client):
     lines = client.log_file.read_text().strip().splitlines()
     assert len(lines) == 1
 
-    # Timestamp is ISO 8601 (optionally with microseconds), then " | phone | text".
     ts_part, phone_part, text_part = lines[0].split(" | ")
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?", ts_part)
     assert phone_part == "16315551181"
@@ -96,7 +90,7 @@ def test_post_valid_payload_writes_log_line(client):
 
 
 def test_post_unrelated_payload_writes_no_log(client):
-    """POST /webhook with a non-WhatsApp object is ignored, and log stays empty."""
+    """POST /webhook with a non-WhatsApp object is ignored, log stays empty."""
     response = client.post("/webhook", json={"object": "something_else"})
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
@@ -105,11 +99,23 @@ def test_post_unrelated_payload_writes_no_log(client):
 
 def test_post_multiple_messages_writes_all_log_lines(client):
     """POST /webhook with multiple messages writes one line per message."""
-    payload = WHATSAPP_PAYLOAD.copy()
-    payload["entry"][0]["changes"][0]["value"]["messages"] = [
-        {"from": "16315551181", "text": {"body": "first"}},
-        {"from": "5491100001111", "text": {"body": "second"}},
-    ]
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {"from": "16315551181", "text": {"body": "first"}},
+                                {"from": "5491100001111", "text": {"body": "second"}},
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+    }
 
     response = client.post("/webhook", json=payload)
     assert response.status_code == 200
@@ -122,14 +128,7 @@ def test_post_multiple_messages_writes_all_log_lines(client):
 
 
 def test_verify_handshake_missing_challenge_crashes(client):
-    """Regresion-guard: a missing hub.challenge currently crashes the endpoint.
-
-    Documents the *current* buggy behavior (see GitHub issue #1): the endpoint
-    calls int(challenge) without validating that challenge is present, so a
-    missing value raises TypeError. FastAPI's TestClient re-raises the server
-    exception instead of returning a 500, so we assert that the crash happens.
-    When issue #1 is fixed to return a graceful error, this test must change.
-    """
+    """Regression-guard: missing hub.challenge currently crashes the endpoint (issue #1)."""
     with pytest.raises(TypeError):
         client.get(
             "/webhook",
@@ -138,12 +137,7 @@ def test_verify_handshake_missing_challenge_crashes(client):
 
 
 def test_verify_handshake_non_numeric_challenge_crashes(client):
-    """Regresion-guard: a non-numeric hub.challenge currently crashes the endpoint.
-
-    Documents the current buggy behavior (see GitHub issue #1): int('abc') raises
-    ValueError. The TestClient re-raises it rather than returning a 500. When the
-    issue is fixed to return a graceful error, this test must change.
-    """
+    """Regression-guard: non-numeric hub.challenge currently crashes the endpoint (issue #1)."""
     with pytest.raises(ValueError):
         client.get(
             "/webhook",
