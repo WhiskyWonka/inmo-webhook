@@ -1,0 +1,13 @@
+# Datos de leads (información personal)
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Entorno
+.env
+.env.*
