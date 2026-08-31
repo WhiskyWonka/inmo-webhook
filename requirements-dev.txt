@@ -1,0 +1,8 @@
+# Runtime dependencies
+fastapi
+uvicorn
+
+# Development / test dependencies
+pytest>=7.0
+httpx>=0.24
+ruff>=0.6
