@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 
 from app.config import Settings
 from app.domain.messages import parse_whatsapp_payload
@@ -20,7 +20,10 @@ def create_app(settings: Settings, store: LeadStore) -> FastAPI:
         mode = request.query_params.get("hub.mode")
         token = request.query_params.get("hub.verify_token")
         challenge = request.query_params.get("hub.challenge")
-        return validate_verification(mode, token, challenge, settings.verify_token)
+        result = validate_verification(mode, token, challenge, settings.verify_token)
+        if result is None:
+            return Response(status_code=400)
+        return Response(content=result, media_type="text/plain", status_code=200)
 
     @app.post("/webhook")
     async def receive_webhook(request: Request):

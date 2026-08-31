@@ -14,6 +14,7 @@
 6. **No direct pushes to `main` or `develop`.** Always PR via GitFlow.
 7. **Conventional commits only.** Prefix: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 8. **No AI attribution in commits.** No "Co-Authored-By" lines.
+9. **Align with Meta's official documentation.** This service is consumed by Meta's WhatsApp Cloud API. The webhook handshake, payload parsing, signatures, HTTP status codes, and response body format must all be verified against the official Meta docs before implementing. NEVER assume Meta's expectations by intuition — `hub.challenge` is a raw opaque STRING (not numeric), and success responses echo the challenge with HTTP 200. Checking Meta's docs is REQUIRED, not optional, for any webhook behavior change.
 
 ## SOLID — Every New Feature (mandatory)
 

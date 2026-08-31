@@ -49,7 +49,7 @@ def client(tmp_path):
 
 
 def test_verify_handshake_returns_challenge(client):
-    """GET /webhook returns the challenge when mode and token match."""
+    """GET /webhook echoes the challenge string with HTTP 200 (Meta expects raw echo)."""
     response = client.get(
         "/webhook",
         params={
@@ -59,11 +59,25 @@ def test_verify_handshake_returns_challenge(client):
         },
     )
     assert response.status_code == 200
-    assert response.json() == 987654
+    assert response.text == "987654"
+
+
+def test_verify_handshake_echoes_non_numeric_challenge(client):
+    """Meta's hub.challenge is an opaque string — alphanumeric challenge echoes with 200."""
+    response = client.get(
+        "/webhook",
+        params={
+            "hub.mode": "subscribe",
+            "hub.verify_token": VALID_TOKEN,
+            "hub.challenge": "abc123xyz",
+        },
+    )
+    assert response.status_code == 200
+    assert response.text == "abc123xyz"
 
 
 def test_verify_handshake_rejects_bad_token(client):
-    """GET /webhook returns an error when the token does not match."""
+    """GET /webhook returns HTTP 400 (empty body) when the token does not match."""
     response = client.get(
         "/webhook",
         params={
@@ -72,8 +86,8 @@ def test_verify_handshake_rejects_bad_token(client):
             "hub.challenge": "987654",
         },
     )
-    assert response.status_code == 200
-    assert response.json() == {"error": "fallo"}
+    assert response.status_code == 400
+    assert response.text == ""
 
 
 def test_post_uses_injected_store_backend(tmp_path):
@@ -153,23 +167,25 @@ def test_post_multiple_messages_writes_all_log_lines(client):
     assert lines[1].endswith("| 5491100001111 | second")
 
 
-def test_verify_handshake_missing_challenge_crashes(client):
-    """Regression-guard: missing hub.challenge currently crashes the endpoint (issue #1)."""
-    with pytest.raises(TypeError):
-        client.get(
-            "/webhook",
-            params={"hub.mode": "subscribe", "hub.verify_token": VALID_TOKEN},
-        )
+def test_verify_handshake_missing_challenge_returns_400(client):
+    """Missing hub.challenge must not crash — returns HTTP 400 (issue #1)."""
+    response = client.get(
+        "/webhook",
+        params={"hub.mode": "subscribe", "hub.verify_token": VALID_TOKEN},
+    )
+    assert response.status_code == 400
+    assert response.text == ""
 
 
-def test_verify_handshake_non_numeric_challenge_crashes(client):
-    """Regression-guard: non-numeric hub.challenge currently crashes the endpoint (issue #1)."""
-    with pytest.raises(ValueError):
-        client.get(
-            "/webhook",
-            params={
-                "hub.mode": "subscribe",
-                "hub.verify_token": VALID_TOKEN,
-                "hub.challenge": "abc",
-            },
-        )
+def test_verify_handshake_bad_mode_returns_400(client):
+    """A non-subscribe mode returns HTTP 400."""
+    response = client.get(
+        "/webhook",
+        params={
+            "hub.mode": "other",
+            "hub.verify_token": VALID_TOKEN,
+            "hub.challenge": "987654",
+        },
+    )
+    assert response.status_code == 400
+    assert response.text == ""
