@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Keep GitHub Actions pinned to commit SHAs and up to date (issue #2).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keep Python runtime dependencies versioned (issue #3).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "fastapi"
+      - dependency-name: "uvicorn"
+      - dependency-name: "pydantic-settings"
