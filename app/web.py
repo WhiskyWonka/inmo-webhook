@@ -1,7 +1,10 @@
+import json
+
 from fastapi import FastAPI, Request, Response
 
 from app.config import Settings
 from app.domain.messages import parse_whatsapp_payload
+from app.domain.signature import verify_signature
 from app.domain.verification import validate_verification
 from app.storage.base import LeadStore
 
@@ -27,7 +30,16 @@ def create_app(settings: Settings, store: LeadStore) -> FastAPI:
 
     @app.post("/webhook")
     async def receive_webhook(request: Request):
-        data = await request.json()
+        raw = await request.body()
+        header = request.headers.get("X-Hub-Signature-256")
+        if not verify_signature(header, settings.app_secret, raw):
+            return Response(status_code=403)
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return Response(status_code=400)
+
         leads = parse_whatsapp_payload(data)
         for lead in leads:
             store.write(lead)
