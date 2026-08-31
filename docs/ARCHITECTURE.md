@@ -81,15 +81,15 @@ No bloated interfaces exist. Each module exposes a minimal API:
 - `validate_verification()` → 4 params, returns `int | dict`
 - `parse_whatsapp_payload()` → 1 param, returns `list[Lead]`
 
-### D — Dependency Inversion Principle ⚠️ VIOLATION
+### D — Dependency Inversion Principle ✅ RESOLVED
 
-**The problem:** `web.py` line 6 imports `LeadLogStore` directly (concrete class), and line 11 instantiates it inside `create_app()`. This couples the web layer to a specific storage implementation.
+**Historical problem:** `web.py` originally imported `LeadLogStore` directly (concrete class) and instantiated it inside `create_app()`. This coupled the web layer to a specific storage implementation.
 
-**Why it matters:** If you want to swap `LeadLogStore` for a database store, you must modify `web.py`. The web layer should depend on an abstraction, not a concrete class.
+**Why it mattered:** Swapping `LeadLogStore` for a database store would have required modifying `web.py`. The web layer should depend on an abstraction, not a concrete class.
 
-**The fix (pending — issue #7 related work):**
+**The fix (implemented):**
 
-1. Create a `Protocol` in `app/storage/base.py`:
+1. A `Protocol` lives in `app/storage/base.py`:
 
 ```python
 from typing import Protocol
@@ -99,13 +99,13 @@ class LeadStore(Protocol):
     def write(self, lead: Lead) -> None: ...
 ```
 
-2. Change `create_app()` signature to accept a store:
+2. `create_app()` now takes the store as an injected argument:
 
 ```python
 def create_app(settings: Settings, store: LeadStore) -> FastAPI:
 ```
 
-3. Wire in `main.py`:
+3. Wiring happens in `main.py` (the composition root):
 
 ```python
 from app.storage.lead_log import LeadLogStore
@@ -113,7 +113,7 @@ store = LeadLogStore(settings.leads_log_path)
 app = create_app(settings, store)
 ```
 
-**Status:** This fix is documented but NOT implemented. It should be done before adding any new storage backend.
+**Status:** RESOLVED. `web.py` no longer imports any concrete store. Any class with matching methods can be injected (see integration test `test_post_uses_injected_store_backend`). New storage backends must implement the `LeadStore` interface.
 
 ---
 
@@ -152,9 +152,9 @@ pytest -q                        # Quiet mode
 ### Adding a New Storage Backend
 
 1. Create `app/storage/new_store.py`
-2. Implement the `LeadStore` Protocol (when DIP fix is applied) or match `LeadLogStore`'s interface
-3. Import and wire in `main.py`
-4. Do NOT modify `web.py` — pass the store via `create_app()`
+2. Implement the `LeadStore` interface (define `write(self, lead: Lead) -> None`)
+3. Import and wire in `main.py` — pass the instance to `create_app(settings, store)`
+4. Do NOT modify `web.py` or its imports — it depends only on the `LeadStore` abstraction
 
 ### Adding a New Domain Function
 

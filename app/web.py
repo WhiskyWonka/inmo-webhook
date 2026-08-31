@@ -3,12 +3,16 @@ from fastapi import FastAPI, Request
 from app.config import Settings
 from app.domain.messages import parse_whatsapp_payload
 from app.domain.verification import validate_verification
-from app.storage.lead_log import LeadLogStore
+from app.storage.base import LeadStore
 
 
-def create_app(settings: Settings) -> FastAPI:
-    """Build and return the FastAPI application wired to the given settings."""
-    store = LeadLogStore(settings.leads_log_path)
+def create_app(settings: Settings, store: LeadStore) -> FastAPI:
+    """Build and return the FastAPI application wired to the given settings.
+
+    The storage backend is injected through the ``store`` argument, so the
+    web layer depends on the ``LeadStore`` abstraction rather than a concrete
+    implementation (Dependency Inversion Principle).
+    """
     app = FastAPI()
 
     @app.get("/webhook")
