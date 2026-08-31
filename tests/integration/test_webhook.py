@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.storage.lead_log import LeadLogStore
 from app.web import create_app
 
 VALID_TOKEN = "test_token"
@@ -40,7 +41,8 @@ def client(tmp_path):
     """Return a TestClient wired to a per-test log path and verify token."""
     log_file = tmp_path / "leads.log"
     settings = Settings(verify_token=VALID_TOKEN, leads_log_path=str(log_file))
-    app = create_app(settings)
+    store = LeadLogStore(settings.leads_log_path)
+    app = create_app(settings, store)
     tc = TestClient(app)
     tc.log_file = log_file
     return tc
@@ -72,6 +74,30 @@ def test_verify_handshake_rejects_bad_token(client):
     )
     assert response.status_code == 200
     assert response.json() == {"error": "fallo"}
+
+
+def test_post_uses_injected_store_backend(tmp_path):
+    """A custom LeadStore backend can be injected into create_app (DIP)."""
+    from app.domain.messages import Lead
+
+    class FakeStore:
+        def __init__(self):
+            self.written: list[Lead] = []
+
+        def write(self, lead: Lead) -> None:
+            self.written.append(lead)
+
+    settings = Settings(verify_token=VALID_TOKEN, leads_log_path=str(tmp_path / "x.log"))
+    fake = FakeStore()
+    app = create_app(settings, fake)
+    tc = TestClient(app)
+
+    response = tc.post("/webhook", json=WHATSAPP_PAYLOAD)
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert len(fake.written) == 1
+    assert fake.written[0].phone == "16315551181"
+    assert fake.written[0].text == "this is a text message"
 
 
 def test_post_valid_payload_writes_log_line(client):
