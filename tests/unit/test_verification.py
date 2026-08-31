@@ -3,36 +3,38 @@
 Pure functions only — no FastAPI, no TestClient, no filesystem.
 """
 
-import pytest
-
 from app.domain.verification import validate_verification
 
 VALID_TOKEN = "test_token"
 
 
 class TestValidateVerification:
-    def test_returns_challenge_on_valid_token(self):
+    def test_returns_challenge_string_on_valid_token(self):
         result = validate_verification("subscribe", VALID_TOKEN, "987654", VALID_TOKEN)
-        assert result == 987654
+        assert result == "987654"
 
-    def test_returns_error_on_bad_token(self):
+    def test_returns_non_numeric_challenge_string_verbatim(self):
+        """Meta's hub.challenge is an opaque string — an alphanumeric value must echo."""
+        result = validate_verification("subscribe", VALID_TOKEN, "abc123xyz", VALID_TOKEN)
+        assert result == "abc123xyz"
+
+    def test_returns_none_on_bad_token(self):
         result = validate_verification("subscribe", "wrong_token", "987654", VALID_TOKEN)
-        assert result == {"error": "fallo"}
+        assert result is None
 
-    def test_returns_error_when_mode_not_subscribe(self):
+    def test_returns_none_when_mode_not_subscribe(self):
         result = validate_verification("unsubscribe", VALID_TOKEN, "987654", VALID_TOKEN)
-        assert result == {"error": "fallo"}
+        assert result is None
 
-    def test_returns_error_when_token_is_none(self):
+    def test_returns_none_when_token_is_none(self):
         result = validate_verification("subscribe", None, "987654", VALID_TOKEN)
-        assert result == {"error": "fallo"}
+        assert result is None
 
-    def test_missing_challenge_crashes(self):
-        """Regression-guard: missing challenge raises TypeError (issue #1)."""
-        with pytest.raises(TypeError):
-            validate_verification("subscribe", VALID_TOKEN, None, VALID_TOKEN)
+    def test_returns_none_when_challenge_is_none(self):
+        """Missing challenge must not crash — returns None, caller maps to 400."""
+        result = validate_verification("subscribe", VALID_TOKEN, None, VALID_TOKEN)
+        assert result is None
 
-    def test_non_numeric_challenge_crashes(self):
-        """Regression-guard: non-numeric challenge raises ValueError (issue #1)."""
-        with pytest.raises(ValueError):
-            validate_verification("subscribe", VALID_TOKEN, "abc", VALID_TOKEN)
+    def test_returns_none_when_challenge_absent_with_bad_token(self):
+        result = validate_verification("subscribe", None, None, VALID_TOKEN)
+        assert result is None
