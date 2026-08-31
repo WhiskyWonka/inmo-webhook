@@ -1,6 +1,7 @@
 # Runtime dependencies
 fastapi
 uvicorn
+pydantic-settings>=2.0
 
 # Development / test dependencies
 pytest>=7.0

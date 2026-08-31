@@ -19,13 +19,41 @@ The server is intentionally minimal -- a single Python file with no database, no
 
 ```
 inmo-webhook/
-├── main.py              # FastAPI app: webhook verification (GET) + message handling (POST)
-├── Dockerfile           # Container build; runs uvicorn
-├── requirements.txt     # Python dependencies (fastapi, uvicorn)
-├── .gitignore           # Ignores /data/ logs and Python artifacts
+├── main.py                 # Composing: Settings → create_app → uvicorn entrypoint
+├── app/
+│   ├── config.py           # Settings (pydantic-settings): verify_token, leads_log_path
+│   ├── domain/
+│   │   ├── messages.py     # Lead model + WhatsApp payload parser
+│   │   └── verification.py # Handshake validation logic (token + challenge)
+│   ├── storage/
+│   │   └── lead_log.py     # LeadLogStore: injected path, ensures dir, writes formatted line
+│   └── web.py              # FastAPI handlers (GET/POST /webhook) — thin, delegates to domain/storage
+├── tests/
+│   ├── unit/
+│   │   ├── test_verification.py   # Pure validation tests — no FastAPI, no filesystem
+│   │   └── test_messages.py       # Pure parser tests — no FastAPI, no filesystem
+│   └── integration/
+│       └── test_webhook.py        # TestClient against the real app (Settings injected)
+├── Dockerfile              # Container build; runs uvicorn
+├── requirements.txt        # Runtime dependencies (fastapi, uvicorn, pydantic-settings)
+├── requirements-dev.txt    # Dev/test dependencies (pytest, httpx, ruff)
+├── pyproject.toml          # Ruff config + pytest pythonpath
+├── .gitignore              # Ignores /data/ logs, __pycache__, pytest/ruff caches
 └── data/
-    └── leads.log        # Runtime output: timestamp | phone | message (NOT committed)
+    └── leads.log           # Runtime output: timestamp | phone | message (NOT committed)
 ```
+
+## Architecture
+
+The app follows a layered structure with clear responsibility boundaries:
+
+- **`app/config.py`** — settings via `pydantic-settings`. Reads `VERIFY_TOKEN` and `LEADS_LOG_PATH` from env vars at instantiation time (not import time), eliminating the `importlib.reload` hack in tests.
+- **`app/domain/`** — pure logic, no framework dependency. `verification.py` handles the Meta handshake validation. `messages.py` parses the nested WhatsApp payload into `Lead` dataclasses.
+- **`app/storage/`** — persistence. `LeadLogStore` takes an injected path, ensures the directory once at construction, and writes formatted log lines.
+- **`app/web.py`** — thin FastAPI layer. Delegates to domain/storage. The `create_app(settings)` factory wires everything together.
+- **`main.py`** — minimal composition: instantiates `Settings()`, calls `create_app(settings)`, exposes `app` for uvicorn.
+
+This separation means domain logic and parser can be tested in isolation (no FastAPI, no `importlib.reload`), and persistence can be swapped out without touching HTTP handlers.
 
 ## Setup / Running locally
 
@@ -215,7 +243,7 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 ```
 
-`requirements-dev.txt` includes both runtime dependencies (fastapi, uvicorn) and development tools (pytest, httpx, ruff).
+`requirements-dev.txt` includes both runtime dependencies (fastapi, uvicorn, pydantic-settings) and development tools (pytest, httpx, ruff).
 
 ### Lint
 
