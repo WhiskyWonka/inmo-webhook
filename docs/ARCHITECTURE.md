@@ -18,7 +18,15 @@ main.py (composition root)
    │     └── signature.py
    └── app/storage/           ← Persistence adapters
          └── lead_log.py
+   └── app/db/                ← Schema metadata for migrations (Alembic/SQLAlchemy Core)
+         └── base.py          ← DeclarativeBase exported for alembic env.py
 ```
+
+> **Note on `app/db/`:** Although `app/db/` is drawn next to the other `app/`
+> modules, it is *schema infrastructure*, not a runtime layer. It exists to feed
+> the migration pipeline (`migrations/env.py` reads `Base.metadata`) and is not
+> part of the runtime request path. It must never be imported by `app/domain/`
+> (keeping Domain pure) and it does not depend on any other application layer.
 
 ### Layer Responsibilities
 
@@ -27,14 +35,16 @@ main.py (composition root)
 | **Config** | `app/config.py` | Load env vars via pydantic-settings | `pydantic_settings` only |
 | **Domain** | `app/domain/*.py` | Pure business logic, no side effects | stdlib only (no FastAPI, no storage) |
 | **Storage** | `app/storage/*.py` | Persistence adapters (write, read, query) | `app/domain/*` (for data classes) |
+| **DB (schema)** | `app/db/*.py` | SQLAlchemy Core metadata for Alembic migrations; NOT a runtime storage adapter | `sqlalchemy` only |
 | **Web** | `app/web.py` | HTTP handlers, request/response wiring | `app/config`, `app/domain/*`, `app/storage/*` |
 | **Composition** | `main.py` | Wire everything together, start uvicorn | `app/config`, `app/web` |
 
 ### Dependency Rules
 
-1. **Domain is the foundation.** `app/domain/` must never import from `app/web`, `app/storage`, or any third-party framework (FastAPI, SQLAlchemy, etc.). Domain modules use only stdlib.
+1. **Domain is the foundation.** `app/domain/` must never import from `app/web`, `app/storage`, `app/db`, or any third-party framework (FastAPI, SQLAlchemy, etc.). Domain modules use only stdlib.
 2. **Storage depends on Domain.** `app/storage/` imports data classes from `app/domain/` (e.g., `Lead`). It must never import from `app/web`.
-3. **Web depends on Domain + Storage.** `app/web.py` orchestrates domain logic and storage writes. It must never import from `main.py`.
+3. **DB layer is isolated schema infra.** `app/db/` provides SQLAlchemy Core metadata for the migration pipeline. It must never be imported by `app/domain/` (keeping Domain pure) and it does not depend on any other application layer. At runtime, persistence still flows through the injected `LeadStore` abstraction — `app/db/` is *not* a runtime storage adapter.
+4. **Web depends on Domain + Storage.** `app/web.py` orchestrates domain logic and storage writes. It must never import from `main.py`.
 4. **Composition is the root.** `main.py` imports `Settings` and `create_app`, wires them, and starts uvicorn. It must never contain business logic.
 
 ### Violation Checklist
@@ -207,6 +217,12 @@ app/domain/messages.py           → Lead dataclass + payload parser
 app/domain/signature.py          → HMAC-SHA256 X-Hub-Signature-256 verification
 app/storage/__init__.py          → Package marker (empty)
 app/storage/lead_log.py          → Append-only log store
+app/db/__init__.py               → Package marker (schema metadata for migrations)
+app/db/base.py                   → DeclarativeBase (Base.metadata) consumed by alembic env.py
+migrations/env.py                → Alembic env: wires target_metadata + DATABASE_URL
+migrations/versions/             → Migration revision scripts (empty in PR 1; models in PR 2)
+alembic.ini                      → Alembic configuration
+entrypoint.sh                    → Container entrypoint: alembic upgrade head + uvicorn
 tests/__init__.py                → Package marker (empty)
 tests/unit/__init__.py           → Package marker (empty)
 tests/unit/test_verification.py  → 6 domain tests
