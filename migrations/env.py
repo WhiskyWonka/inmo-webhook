@@ -5,6 +5,8 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 from app.config import Settings
+
+import app.db  # noqa: F401 — register models with Base.metadata
 from app.db.base import Base
 
 # this is the Alembic Config object, which provides

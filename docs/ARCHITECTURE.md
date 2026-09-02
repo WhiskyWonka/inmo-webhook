@@ -19,7 +19,8 @@ main.py (composition root)
    └── app/storage/           ← Persistence adapters
          └── lead_log.py
    └── app/db/                ← Schema metadata for migrations (Alembic/SQLAlchemy Core)
-         └── base.py          ← DeclarativeBase exported for alembic env.py
+         ├── base.py          ← DeclarativeBase exported for alembic env.py
+         └── models/          ← ORM models (neighborhoods, properties, leads)
 ```
 
 > **Note on `app/db/`:** Although `app/db/` is drawn next to the other `app/`
@@ -27,6 +28,9 @@ main.py (composition root)
 > the migration pipeline (`migrations/env.py` reads `Base.metadata`) and is not
 > part of the runtime request path. It must never be imported by `app/domain/`
 > (keeping Domain pure) and it does not depend on any other application layer.
+> `app/db/models/` holds the ORM models (neighborhoods, properties, leads);
+> importing `app.db` registers them all with `Base.metadata` so Alembic
+> `autogenerate` picks up every table automatically.
 
 ### Layer Responsibilities
 
@@ -35,7 +39,7 @@ main.py (composition root)
 | **Config** | `app/config.py` | Load env vars via pydantic-settings | `pydantic_settings` only |
 | **Domain** | `app/domain/*.py` | Pure business logic, no side effects | stdlib only (no FastAPI, no storage) |
 | **Storage** | `app/storage/*.py` | Persistence adapters (write, read, query) | `app/domain/*` (for data classes) |
-| **DB (schema)** | `app/db/*.py` | SQLAlchemy Core metadata for Alembic migrations; NOT a runtime storage adapter | `sqlalchemy` only |
+| **DB (schema)** | `app/db/*.py`, `app/db/models/*.py` | SQLAlchemy Core metadata for Alembic migrations; NOT a runtime storage adapter | `sqlalchemy` only |
 | **Web** | `app/web.py` | HTTP handlers, request/response wiring | `app/config`, `app/domain/*`, `app/storage/*` |
 | **Composition** | `main.py` | Wire everything together, start uvicorn | `app/config`, `app/web` |
 
@@ -186,6 +190,14 @@ pytest -q                        # Quiet mode
 2. Set a default value
 3. Document in README.md
 
+### Adding a New Schema Model (migration)
+
+1. Create `app/db/models/<name>.py` declaring a `Base` subclass with SQLAlchemy 2.0 style (`Mapped` / `mapped_column`).
+2. Import and re-export it from `app/db/models/__init__.py` so it registers with `Base.metadata`.
+3. Run `alembic revision --autogenerate -m "add <table> table"` against a reachable Postgres to generate the migration.
+4. Review the generated revision: ensure CHECK constraints, FKs (`ondelete`), JSONB columns, server defaults, and indexes are present; alembic does NOT auto-generate triggers, functions, or seed data — add those by hand.
+5. Add unit tests in `tests/unit/test_db_models.py` (metadata-only) and integration coverage in `tests/integration/test_schema.py`.
+
 ---
 
 ## Request Signature Verification
@@ -217,10 +229,14 @@ app/domain/messages.py           → Lead dataclass + payload parser
 app/domain/signature.py          → HMAC-SHA256 X-Hub-Signature-256 verification
 app/storage/__init__.py          → Package marker (empty)
 app/storage/lead_log.py          → Append-only log store
-app/db/__init__.py               → Package marker (schema metadata for migrations)
+app/db/__init__.py               → Package marker (imports app.db.models to register schema)
 app/db/base.py                   → DeclarativeBase (Base.metadata) consumed by alembic env.py
+app/db/models/__init__.py        → Package marker; re-exports the ORM models
+app/db/models/neighborhoods.py   → `neighborhoods` table (barrios seeded via migration, issue #37)
+app/db/models/properties.py      → `properties` table (listings, issue #31)
+app/db/models/leads.py           → `leads` table (prospects, issue #31)
 migrations/env.py                → Alembic env: wires target_metadata + DATABASE_URL
-migrations/versions/             → Migration revision scripts (empty in PR 1; models in PR 2)
+migrations/versions/             → Migration revision scripts (first schema migration in PR 2)
 alembic.ini                      → Alembic configuration
 entrypoint.sh                    → Container entrypoint: alembic upgrade head + uvicorn
 tests/__init__.py                → Package marker (empty)
