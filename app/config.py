@@ -7,3 +7,4 @@ class Settings(BaseSettings):
     verify_token: str = ""
     app_secret: str = ""
     leads_log_path: str = "/app/data/leads.log"
+    database_url: str = ""

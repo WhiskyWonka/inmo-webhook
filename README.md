@@ -13,6 +13,8 @@ The server is intentionally minimal -- a single Python file with no database, no
 - **Python 3.11** -- runtime
 - **FastAPI** -- HTTP framework; handles routing, request parsing, and JSON serialization
 - **Uvicorn** -- ASGI server; runs the FastAPI application
+- **Alembic** -- database migration engine (schema management)
+- **SQLAlchemy Core** -- metadata/schema layer consumed by Alembic
 - **Docker** -- containerization; builds a reproducible image based on `python:3.11-slim`
 
 ## Project structure
@@ -21,21 +23,29 @@ The server is intentionally minimal -- a single Python file with no database, no
 inmo-webhook/
 ├── main.py                 # Composing: Settings → create_app → uvicorn entrypoint
 ├── app/
-│   ├── config.py           # Settings (pydantic-settings): verify_token, leads_log_path
+│   ├── config.py           # Settings (pydantic-settings): verify_token, app_secret, database_url
 │   ├── domain/
 │   │   ├── messages.py     # Lead model + WhatsApp payload parser
 │   │   └── verification.py # Handshake validation logic (token + challenge)
 │   ├── storage/
 │   │   └── lead_log.py     # LeadLogStore: injected path, ensures dir, writes formatted line
+│   ├── db/
+│   │   └── base.py         # DeclarativeBase (Base.metadata) for Alembic migrations
 │   └── web.py              # FastAPI handlers (GET/POST /webhook) — thin, delegates to domain/storage
+├── migrations/
+│   ├── env.py              # Alembic env: target_metadata + DATABASE_URL wiring
+│   └── versions/           # Migration revision scripts
+├── alembic.ini             # Alembic configuration
+├── entrypoint.sh           # Container entrypoint: alembic upgrade head + uvicorn
 ├── tests/
 │   ├── unit/
 │   │   ├── test_verification.py   # Pure validation tests — no FastAPI, no filesystem
 │   │   └── test_messages.py       # Pure parser tests — no FastAPI, no filesystem
 │   └── integration/
-│       └── test_webhook.py        # TestClient against the real app (Settings injected)
-├── Dockerfile              # Container build; runs uvicorn
-├── requirements.txt        # Runtime dependencies (fastapi, uvicorn, pydantic-settings)
+│       ├── test_webhook.py        # TestClient against the real app (Settings injected)
+│       └── test_migrations.py     # Alembic smoke test (runs `upgrade head`, skips without DB)
+├── Dockerfile              # Container build; runs alembic upgrade head + uvicorn via entrypoint
+├── requirements.txt        # Runtime dependencies (fastapi, uvicorn, pydantic-settings, sqlalchemy, alembic)
 ├── requirements-dev.txt    # Dev/test dependencies (pytest, httpx, ruff)
 ├── pyproject.toml          # Ruff config + pytest pythonpath
 ├── .gitignore              # Ignores /data/ logs, __pycache__, pytest/ruff caches
@@ -50,6 +60,7 @@ The app follows a layered structure with clear responsibility boundaries:
 - **`app/config.py`** — settings via `pydantic-settings`. Reads `VERIFY_TOKEN` and `LEADS_LOG_PATH` from env vars at instantiation time (not import time), eliminating the `importlib.reload` hack in tests.
 - **`app/domain/`** — pure logic, no framework dependency. `verification.py` handles the Meta handshake validation. `messages.py` parses the nested WhatsApp payload into `Lead` dataclasses.
 - **`app/storage/`** — persistence. `LeadLogStore` takes an injected path, ensures the directory once at construction, and writes formatted log lines.
+- **`app/db/`** — schema metadata for migrations. `base.py` defines the SQLAlchemy `DeclarativeBase` consumed by `migrations/env.py`. This is migration infrastructure, not a runtime storage adapter — runtime persistence still flows through the injected `LeadStore`.
 - **`app/web.py`** — thin FastAPI layer. Delegates to domain/storage. The `create_app(settings)` factory wires everything together.
 - **`main.py`** — minimal composition: instantiates `Settings()`, calls `create_app(settings)`, exposes `app` for uvicorn.
 
@@ -106,6 +117,37 @@ docker run -d \
 ```
 
 The `-v $(pwd)/data:/app/data` volume mount maps your local `data/` directory into the container so that `leads.log` persists across container restarts. Without this mount, log data is lost when the container is removed.
+
+## Migrations
+
+Database schema is managed with **Alembic** on top of **SQLAlchemy Core metadata**
+(`app/db/base.py`). The migration pipeline is infrastructure-only: PR 1 ships an
+empty migration history, and actual tables (properties, leads, neighborhoods)
+are added in a follow-up change.
+
+### Applying migrations
+
+```bash
+# The URL comes from the DATABASE_URL environment variable
+export DATABASE_URL="postgresql+psycopg://user:pass@localhost:5432/inmobot"
+alembic upgrade head
+```
+
+`alembic upgrade head` runs automatically on container startup via
+`entrypoint.sh` before uvicorn starts. If `DATABASE_URL` is not set, the
+entrypoint skips migrations and still starts the server.
+
+### Generating a new migration
+
+After adding or changing a model in `app/db/`, auto-generate a revision from the
+current schema:
+
+```bash
+alembic revision --autogenerate -m "describe the change"
+alembic upgrade head
+```
+
+Reviews the generated `migrations/versions/` file before applying it.
 
 ## Configuring the Meta / WhatsApp webhook
 

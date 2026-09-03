@@ -1,0 +1,47 @@
+services:
+  db-inmo:
+    image: postgres:15-alpine
+    container_name: db-inmo
+    environment:
+      POSTGRES_DB: inmobot
+      POSTGRES_USER: inmo_user
+      POSTGRES_PASSWORD: ${INMO_DB_PASSWORD}
+    volumes:
+      - db-inmo-data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inmo_user -d inmobot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - inmo-internal
+
+  inmo-webhook:
+    build: .
+    container_name: inmo-webhook
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://inmo_user:${INMO_DB_PASSWORD}@db-inmo:5432/inmobot
+      APP_SECRET: ${APP_SECRET}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - inmo-internal
+      - npm-network
+    depends_on:
+      db-inmo:
+        condition: service_healthy
+    labels:
+      - "logging=promtail"
+      - "log_job=inmo-webhook"
+
+networks:
+  inmo-internal:
+    driver: bridge
+  npm-network:
+    external: true
+
+volumes:
+  db-inmo-data:
