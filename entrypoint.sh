@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Entrypoint for the inmo-webhook container.
 #
-# 1. Applies pending database migrations (no-op while the migration history is
-#    empty; `alembic upgrade head` must succeed without creating any tables).
+# 1. Applies pending database migrations; the first migration creates the
+#    properties, leads, and neighborhoods tables (with triggers and seed data).
 # 2. Starts the FastAPI application with uvicorn.
 #
 # If DATABASE_URL is not set, migrations are skipped and the server still
