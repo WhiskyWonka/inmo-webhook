@@ -20,7 +20,11 @@ def _skip_without_database() -> None:
 
 def _run_upgrade_head() -> None:
     """Run ``alembic upgrade head`` against the configured database."""
-    cfg = Config("alembic.ini")
+    # Absolute path so it works regardless of the pytest working directory.
+    ini_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "alembic.ini"
+    )
+    cfg = Config(os.path.abspath(ini_path))
     command.upgrade(cfg, "head")
 
 

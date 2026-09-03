@@ -30,7 +30,8 @@ inmo-webhook/
 │   ├── storage/
 │   │   └── lead_log.py     # LeadLogStore: injected path, ensures dir, writes formatted line
 │   ├── db/
-│   │   └── base.py         # DeclarativeBase (Base.metadata) for Alembic migrations
+│   │   ├── base.py         # DeclarativeBase (Base.metadata) for Alembic migrations
+│   │   └── models/         # ORM models: neighborhoods.py, properties.py, leads.py
 │   └── web.py              # FastAPI handlers (GET/POST /webhook) — thin, delegates to domain/storage
 ├── migrations/
 │   ├── env.py              # Alembic env: target_metadata + DATABASE_URL wiring
@@ -60,7 +61,7 @@ The app follows a layered structure with clear responsibility boundaries:
 - **`app/config.py`** — settings via `pydantic-settings`. Reads `VERIFY_TOKEN` and `LEADS_LOG_PATH` from env vars at instantiation time (not import time), eliminating the `importlib.reload` hack in tests.
 - **`app/domain/`** — pure logic, no framework dependency. `verification.py` handles the Meta handshake validation. `messages.py` parses the nested WhatsApp payload into `Lead` dataclasses.
 - **`app/storage/`** — persistence. `LeadLogStore` takes an injected path, ensures the directory once at construction, and writes formatted log lines.
-- **`app/db/`** — schema metadata for migrations. `base.py` defines the SQLAlchemy `DeclarativeBase` consumed by `migrations/env.py`. This is migration infrastructure, not a runtime storage adapter — runtime persistence still flows through the injected `LeadStore`.
+- **`app/db/`** — schema metadata for migrations. `base.py` defines the SQLAlchemy `DeclarativeBase` consumed by `migrations/env.py`; `models/` defines the `neighborhoods`, `properties`, and `leads` ORM tables. This is migration infrastructure, not a runtime storage adapter — runtime persistence still flows through the injected `LeadStore`.
 - **`app/web.py`** — thin FastAPI layer. Delegates to domain/storage. The `create_app(settings)` factory wires everything together.
 - **`main.py`** — minimal composition: instantiates `Settings()`, calls `create_app(settings)`, exposes `app` for uvicorn.
 
@@ -121,9 +122,12 @@ The `-v $(pwd)/data:/app/data` volume mount maps your local `data/` directory in
 ## Migrations
 
 Database schema is managed with **Alembic** on top of **SQLAlchemy Core metadata**
-(`app/db/base.py`). The migration pipeline is infrastructure-only: PR 1 ships an
-empty migration history, and actual tables (properties, leads, neighborhoods)
-are added in a follow-up change.
+(`app/db/base.py`). The models live in `app/db/models/` (neighborhoods,
+properties, leads) and are registered with `Base.metadata` when `app.db` is
+imported. The first migration (`create properties, leads, neighborhoods tables`)
+creates the three tables, their CHECK/foreign-key constraints and indexes, the
+`update_updated_at_column()` function plus the two `updated_at` triggers, and
+seeds the 19 barrios into `neighborhoods`.
 
 ### Applying migrations
 
