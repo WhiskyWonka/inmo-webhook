@@ -193,7 +193,9 @@ class PostgresNeighborhoodStore:
         self._engine = engine
 
     def list(self, zone: str | None = None) -> list[Neighborhood]:
-        stmt = select(NeighborhoodModel.__table__)
+        stmt = select(NeighborhoodModel.__table__).order_by(
+            NeighborhoodModel.__table__.c.name
+        )
         if zone is not None:
             stmt = stmt.where(NeighborhoodModel.__table__.c.zone == zone)
         with self._engine.connect() as conn:

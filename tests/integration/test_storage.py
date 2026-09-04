@@ -320,11 +320,13 @@ def test_neighborhood_store_list_all(engine):
     names = {n.name for n in results}
     assert "Palermo" in names
     assert "Tigre" in names
-    assert len(results) >= 19, "expected the full seeded neighborhood set"
+    assert len(results) == 19, "expected the exact seeded neighborhood set"
+    # City is per-row: CABA rows default to CABA, GBA rows are stored as GBA.
+    assert {n.city for n in results if n.zone == Zone.gba_norte} == {"GBA"}
+    assert {n.city for n in results if n.zone != Zone.gba_norte} == {"CABA"}
     for n in results:
         assert isinstance(n, Neighborhood)
         assert isinstance(n.zone, Zone)
-        assert n.city == "CABA"
         assert n.id
 
 

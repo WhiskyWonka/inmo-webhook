@@ -3,6 +3,8 @@
 Pure domain — no FastAPI, no database.
 """
 
+import pytest
+
 from app.domain.neighborhoods import Neighborhood, Zone
 
 
@@ -21,6 +23,10 @@ class TestZone:
     def test_zone_compares_cleanly_with_string(self):
         assert Zone.norte == "norte"
         assert Zone("centro") == Zone.centro
+
+    def test_zone_rejects_out_of_enum_value(self):
+        with pytest.raises(ValueError):
+            Zone("no_such_zone")
 
 
 class TestNeighborhood:
