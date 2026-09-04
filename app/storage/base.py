@@ -7,8 +7,10 @@ live in sibling modules and only need to match these protocols.
 """
 
 import uuid
+from datetime import datetime
 from typing import Protocol
 
+from app.domain.appointments import Appointment, AppointmentStatus
 from app.domain.messages import LeadWithMessages
 from app.domain.neighborhoods import Neighborhood
 from app.domain.properties import PropertyLog
@@ -70,3 +72,30 @@ class PropertyLogStore(Protocol):
     ) -> None: ...
 
     def list(self, property_id: str | None = None) -> list[PropertyLog]: ...
+
+
+class AppointmentStore(Protocol):
+    """Interface for scheduling and querying property visit appointments."""
+
+    def create(
+        self,
+        lead_id: str,
+        property_id: str,
+        scheduled_at: datetime,
+        duration_minutes: int | None = 30,
+        status: AppointmentStatus = AppointmentStatus.pendiente,
+        reminder_sent_24h: bool | None = False,
+        reminder_sent_1h: bool | None = False,
+        reminder_sent_15min: bool | None = False,
+        feedback: str | None = None,
+        interested_after_visit: bool | None = None,
+    ) -> uuid.UUID: ...
+
+    def list(
+        self,
+        lead_id: str | None = None,
+        property_id: str | None = None,
+        status: AppointmentStatus | None = None,
+    ) -> list[Appointment]: ...
+
+    def find_by_id(self, appointment_id: str) -> Appointment | None: ...
