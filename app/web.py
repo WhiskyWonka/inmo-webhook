@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi import FastAPI, Request, Response
 
@@ -7,6 +8,15 @@ from app.domain.messages import parse_whatsapp_payload
 from app.domain.signature import verify_signature
 from app.domain.verification import validate_verification
 from app.storage.base import LeadStore
+
+logger = logging.getLogger(__name__)
+
+
+def _redact_phone(phone: str) -> str:
+    """Redact a phone to its last 4 digits to avoid logging full PII."""
+    if len(phone) <= 4:
+        return "****"
+    return f"****{phone[-4:]}"
 
 
 def create_app(settings: Settings, store: LeadStore) -> FastAPI:
@@ -40,10 +50,14 @@ def create_app(settings: Settings, store: LeadStore) -> FastAPI:
         except json.JSONDecodeError:
             return Response(status_code=400)
 
-        leads = parse_whatsapp_payload(data)
-        for lead in leads:
-            store.write(lead)
-            print(f"\U0001f4e9 {lead.phone}: {lead.text}")
+        parsed = parse_whatsapp_payload(data)
+        for aggregate in parsed:
+            store.write(aggregate)
+            logger.info(
+                "persisted lead %s with %d message(s)",
+                _redact_phone(aggregate.lead.phone),
+                len(aggregate.messages),
+            )
         return {"status": "ok"}
 
     return app
