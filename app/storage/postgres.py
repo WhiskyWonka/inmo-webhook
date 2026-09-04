@@ -1,26 +1,30 @@
 """PostgreSQL storage adapters.
 
-Concrete implementations of the ``LeadStore``, ``PropertyStore``, and
-``PropertyLogStore`` protocols. They use SQLAlchemy 2.0 connections/transactions
-and the ORM models from ``app/db/models`` to persist leads (with their
-messages), properties, and the property audit trail. The web layer never
-imports these directly — it only depends on the protocols in
-``app/storage/base.py`` (Dependency Inversion Principle).
+Concrete implementations of the ``LeadStore``, ``PropertyStore``,
+``PropertyLogStore``, and ``AppointmentStore`` protocols. They use SQLAlchemy
+2.0 connections/transactions and the ORM models from ``app/db/models`` to
+persist leads (with their messages), properties, the property audit trail, and
+property visit appointments. The web layer never imports these directly — it
+only depends on the protocols in ``app/storage/base.py`` (Dependency Inversion
+Principle).
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 
+from app.db.models.appointments import Appointment as AppointmentModel
 from app.db.models.leads import Lead as LeadModel
 from app.db.models.messages import Message as MessageModel
 from app.db.models.neighborhoods import Neighborhood as NeighborhoodModel
 from app.db.models.properties import Property as PropertyModel
 from app.db.models.property_logs import PropertyLog as PropertyLogModel
+from app.domain.appointments import Appointment, AppointmentStatus
 from app.domain.messages import LeadWithMessages, Message
 from app.domain.neighborhoods import Neighborhood, Zone
 from app.domain.properties import PropertyLog
@@ -273,3 +277,94 @@ class PostgresPropertyLogStore:
             )
             for row in rows
         ]
+
+
+class PostgresAppointmentStore:
+    """Schedule and query property visit appointments.
+
+    ``create`` inserts an appointment and returns its generated UUID; ``list``
+    reads appointments with optional lead/property/status filters, ordered by
+    ``scheduled_at`` then ``id`` (deterministic tiebreaker — same lesson as
+    #36); ``find_by_id`` fetches a single appointment.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def create(
+        self,
+        lead_id: str,
+        property_id: str,
+        scheduled_at: datetime,
+        duration_minutes: int | None = 30,
+        status: AppointmentStatus = AppointmentStatus.pendiente,
+        reminder_sent_24h: bool | None = False,
+        reminder_sent_1h: bool | None = False,
+        reminder_sent_15min: bool | None = False,
+        feedback: str | None = None,
+        interested_after_visit: bool | None = None,
+    ) -> uuid.UUID:
+        values = {
+            "lead_id": lead_id,
+            "property_id": property_id,
+            "scheduled_at": scheduled_at,
+            "duration_minutes": duration_minutes,
+            "status": status.value,
+            "reminder_sent_24h": reminder_sent_24h,
+            "reminder_sent_1h": reminder_sent_1h,
+            "reminder_sent_15min": reminder_sent_15min,
+            "feedback": feedback,
+            "interested_after_visit": interested_after_visit,
+        }
+        stmt = (
+            pg_insert(AppointmentModel.__table__)
+            .values(**values)
+            .returning(AppointmentModel.__table__.c.id)
+        )
+        with self._engine.begin() as conn:
+            appointment_id = conn.execute(stmt).scalar_one()
+        return appointment_id
+
+    def list(
+        self,
+        lead_id: str | None = None,
+        property_id: str | None = None,
+        status: AppointmentStatus | None = None,
+    ) -> list[Appointment]:
+        stmt = select(AppointmentModel.__table__).order_by(
+            AppointmentModel.__table__.c.scheduled_at,
+            AppointmentModel.__table__.c.id,
+        )
+        if lead_id is not None:
+            stmt = stmt.where(AppointmentModel.__table__.c.lead_id == lead_id)
+        if property_id is not None:
+            stmt = stmt.where(AppointmentModel.__table__.c.property_id == property_id)
+        if status is not None:
+            stmt = stmt.where(AppointmentModel.__table__.c.status == status.value)
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._to_domain(row) for row in rows]
+
+    def find_by_id(self, appointment_id: str) -> Appointment | None:
+        stmt = select(AppointmentModel.__table__).where(
+            AppointmentModel.__table__.c.id == appointment_id
+        )
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return self._to_domain(row) if row else None
+
+    @staticmethod
+    def _to_domain(row) -> Appointment:
+        return Appointment(
+            id=str(row["id"]),
+            lead_id=str(row["lead_id"]),
+            property_id=str(row["property_id"]),
+            scheduled_at=row["scheduled_at"],
+            duration_minutes=row["duration_minutes"],
+            status=AppointmentStatus(row["status"]),
+            reminder_sent_24h=row["reminder_sent_24h"],
+            reminder_sent_1h=row["reminder_sent_1h"],
+            reminder_sent_15min=row["reminder_sent_15min"],
+            feedback=row["feedback"],
+            interested_after_visit=row["interested_after_visit"],
+        )
