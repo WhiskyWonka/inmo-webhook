@@ -1,11 +1,20 @@
 import uvicorn
+from sqlalchemy import create_engine
 
 from app.config import Settings
-from app.storage.lead_log import LeadLogStore
+from app.storage.postgres import PostgresLeadStore
 from app.web import create_app
 
 settings = Settings()
-store = LeadLogStore(settings.leads_log_path)
+
+if not settings.database_url:
+    raise ValueError(
+        "DATABASE_URL is empty: LeadLogStore is retired and Postgres is now "
+        "required. Set DATABASE_URL (e.g. postgres://user:pass@host:5432/inmobot)."
+    )
+
+_engine = create_engine(settings.database_url)
+store = PostgresLeadStore(_engine)
 app = create_app(settings, store)
 
 if __name__ == "__main__":
