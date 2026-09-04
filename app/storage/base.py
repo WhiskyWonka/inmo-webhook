@@ -10,6 +10,7 @@ import uuid
 from typing import Protocol
 
 from app.domain.messages import LeadWithMessages
+from app.domain.neighborhoods import Neighborhood
 
 
 class LeadStore(Protocol):
@@ -40,3 +41,9 @@ class PropertyStore(Protocol):
     def list(self, **kwargs) -> list[dict]: ...
 
     def find_by_reference_code(self, reference_code: str) -> dict | None: ...
+
+
+class NeighborhoodStore(Protocol):
+    """Interface for listing seeded neighborhoods."""
+
+    def list(self, zone: str | None = None) -> list[Neighborhood]: ...
