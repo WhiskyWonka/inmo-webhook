@@ -1,4 +1,5 @@
-"""Unit tests for the SQLAlchemy schema models (properties, leads, neighborhoods).
+"""Unit tests for the SQLAlchemy schema models (properties, leads,
+neighborhoods, messages, property_logs).
 
 These tests inspect ``Base.metadata`` directly — no database required. They
 verify that the models declare the expected columns, types, check constraints,
@@ -32,12 +33,13 @@ def _quoted_literal_count(ck: CheckConstraint) -> int:
 # --------------------------------------------------------------------------
 
 
-def test_all_four_tables_registered_in_base_metadata():
+def test_all_tables_registered_in_base_metadata():
     """Base.metadata must see the model tables."""
     assert "neighborhoods" in Base.metadata.tables
     assert "properties" in Base.metadata.tables
     assert "leads" in Base.metadata.tables
     assert "messages" in Base.metadata.tables
+    assert "property_logs" in Base.metadata.tables
 
 
 # --------------------------------------------------------------------------
@@ -347,3 +349,54 @@ def test_messages_check_constraints():
     assert "inbound" in ck["ck_messages_direction"].sqltext.text
     assert "outbound" in ck["ck_messages_direction"].sqltext.text
     assert "interactive" in ck["ck_messages_message_type"].sqltext.text
+
+
+# --------------------------------------------------------------------------
+# property_logs
+# --------------------------------------------------------------------------
+
+
+def test_property_logs_columns_and_types():
+    table = Base.metadata.tables["property_logs"]
+    assert isinstance(table.c.id.type, UUID)
+    assert isinstance(table.c.property_id.type, UUID)
+    assert isinstance(table.c.field_changed.type, String)
+    assert table.c.field_changed.type.length == 50
+    assert isinstance(table.c.old_value.type, Text)
+    assert isinstance(table.c.new_value.type, Text)
+    assert isinstance(table.c.changed_by.type, String)
+    assert table.c.changed_by.type.length == 50
+    assert isinstance(table.c.created_at.type, DateTime)
+
+
+def test_property_logs_not_null_and_defaults():
+    table = Base.metadata.tables["property_logs"]
+    assert table.c.id.server_default.arg.text == "gen_random_uuid()"
+    assert table.c.id.primary_key
+    assert not table.c.property_id.nullable
+    assert not table.c.field_changed.nullable
+    assert not table.c.changed_by.nullable
+    assert not table.c.created_at.nullable
+    assert table.c.old_value.nullable
+    assert table.c.new_value.nullable
+    assert table.c.changed_by.server_default.arg.text == "'sistema'"
+    assert table.c.created_at.server_default.arg.text == "CURRENT_TIMESTAMP"
+
+
+def test_property_logs_foreign_key_to_properties_cascade():
+    table = Base.metadata.tables["property_logs"]
+    fks = [fk for fk in table.foreign_keys]
+    assert len(fks) == 1
+    fk = fks[0]
+    assert fk.parent.key == "property_id"
+    assert fk.column.table.name == "properties"
+    assert fk.ondelete == "CASCADE"
+
+
+def test_property_logs_indexes():
+    table = Base.metadata.tables["property_logs"]
+    indexes = {ix.name: list(ix.columns) for ix in table.indexes}
+    assert "ix_property_logs_property_id" in indexes
+    assert indexes["ix_property_logs_property_id"] == [table.c.property_id]
+    assert "ix_property_logs_created_at" in indexes
+    assert indexes["ix_property_logs_created_at"] == [table.c.created_at]

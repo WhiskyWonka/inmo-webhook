@@ -1,9 +1,10 @@
 """PostgreSQL storage adapters.
 
-Concrete implementations of the ``LeadStore`` and ``PropertyStore`` protocols.
-They use SQLAlchemy 2.0 connections/transactions and the ORM models from
-``app/db/models`` to persist leads (with their messages) and properties. The
-web layer never imports these directly — it only depends on the protocols in
+Concrete implementations of the ``LeadStore``, ``PropertyStore``, and
+``PropertyLogStore`` protocols. They use SQLAlchemy 2.0 connections/transactions
+and the ORM models from ``app/db/models`` to persist leads (with their
+messages), properties, and the property audit trail. The web layer never
+imports these directly — it only depends on the protocols in
 ``app/storage/base.py`` (Dependency Inversion Principle).
 """
 
@@ -19,8 +20,10 @@ from app.db.models.leads import Lead as LeadModel
 from app.db.models.messages import Message as MessageModel
 from app.db.models.neighborhoods import Neighborhood as NeighborhoodModel
 from app.db.models.properties import Property as PropertyModel
+from app.db.models.property_logs import PropertyLog as PropertyLogModel
 from app.domain.messages import LeadWithMessages, Message
 from app.domain.neighborhoods import Neighborhood, Zone
+from app.domain.properties import PropertyLog
 
 # Columns that are set on INSERT but intentionally NOT clobbered by an
 # UPDATE-on-conflict. ``status`` is pipeline state (v_leads_pipeline) and
@@ -206,6 +209,67 @@ class PostgresNeighborhoodStore:
                 name=row["name"],
                 zone=Zone(row["zone"]),
                 city=row["city"],
+            )
+            for row in rows
+        ]
+
+
+class PostgresPropertyLogStore:
+    """Append to and read the ``property_logs`` audit trail.
+
+    Entries are written as a side-effect of property updates; the triggers
+    that populate the table are out of scope (#36). This adapter provides
+    the persistence scaffolding: ``append`` records a single field change and
+    ``list`` reads the trail for one property (or the whole table).
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def append(
+        self,
+        property_id: str,
+        field_changed: str,
+        old_value: str | None,
+        new_value: str | None,
+        changed_by: str = "sistema",
+    ) -> None:
+        if not field_changed:
+            raise ValueError("field_changed must be a non-empty string")
+        values = {
+            "property_id": property_id,
+            "field_changed": field_changed,
+            "old_value": old_value,
+            "new_value": new_value,
+            "changed_by": changed_by,
+        }
+        stmt = (
+            pg_insert(PropertyLogModel.__table__)
+            .values(**values)
+            .returning(PropertyLogModel.__table__.c.id)
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt).scalar_one()
+
+    def list(self, property_id: str | None = None) -> list[PropertyLog]:
+        stmt = select(PropertyLogModel.__table__).order_by(
+            PropertyLogModel.__table__.c.created_at,
+            PropertyLogModel.__table__.c.id,
+        )
+        if property_id is not None:
+            stmt = stmt.where(
+                PropertyLogModel.__table__.c.property_id == property_id
+            )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [
+            PropertyLog(
+                id=str(row["id"]),
+                property_id=str(row["property_id"]),
+                field_changed=row["field_changed"],
+                old_value=row["old_value"],
+                new_value=row["new_value"],
+                changed_by=row["changed_by"],
             )
             for row in rows
         ]

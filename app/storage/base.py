@@ -11,6 +11,7 @@ from typing import Protocol
 
 from app.domain.messages import LeadWithMessages
 from app.domain.neighborhoods import Neighborhood
+from app.domain.properties import PropertyLog
 
 
 class LeadStore(Protocol):
@@ -47,3 +48,25 @@ class NeighborhoodStore(Protocol):
     """Interface for listing seeded neighborhoods."""
 
     def list(self, zone: str | None = None) -> list[Neighborhood]: ...
+
+
+class PropertyLogStore(Protocol):
+    """Interface for appending to and reading the property audit trail.
+
+    Entries are written as a side-effect of property updates (the triggers
+    that populate it are out of scope); this adapter provides the
+    persistence scaffolding. ``list`` returns entries ordered oldest-first
+    by created_at, with id as tiebreaker for rows written in the same
+    transaction.
+    """
+
+    def append(
+        self,
+        property_id: str,
+        field_changed: str,
+        old_value: str | None,
+        new_value: str | None,
+        changed_by: str = "sistema",
+    ) -> None: ...
+
+    def list(self, property_id: str | None = None) -> list[PropertyLog]: ...
