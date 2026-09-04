@@ -1,8 +1,9 @@
 """Integration tests for the Postgres storage adapters.
 
 These exercise ``PostgresLeadStore`` (upsert by phone, message append,
-idempotency via external_id) and ``PostgresPropertyStore`` against a reachable
-Postgres (DATABASE_URL). They run in CI.
+idempotency via external_id), ``PostgresPropertyStore``, and
+``PostgresPropertyLogStore`` against a reachable Postgres (DATABASE_URL).
+They run in CI.
 """
 
 import os
@@ -14,7 +15,13 @@ from sqlalchemy import create_engine, text
 
 from app.domain.messages import Lead, LeadWithMessages, Message
 from app.domain.neighborhoods import Neighborhood, Zone
-from app.storage.postgres import PostgresLeadStore, PostgresNeighborhoodStore, PostgresPropertyStore
+from app.domain.properties import PropertyLog
+from app.storage.postgres import (
+    PostgresLeadStore,
+    PostgresNeighborhoodStore,
+    PostgresPropertyLogStore,
+    PostgresPropertyStore,
+)
 from tests.integration._helpers import (
     _alembic_config,
     _skip_without_database,
@@ -307,6 +314,114 @@ def test_property_store_list_filters_by_property_type(engine):
             conn.execute(
                 text("DELETE FROM properties WHERE reference_code = :r"), {"r": ref}
             )
+
+
+# ---------------------------------------------------------------------------
+# PostgresPropertyLogStore
+# ---------------------------------------------------------------------------
+
+
+def test_property_log_store_append_and_list(engine):
+    store = PostgresPropertyStore(engine)
+    log_store = PostgresPropertyLogStore(engine)
+    ref = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    try:
+        prop_id = store.create(
+            reference_code=ref,
+            address="Av. Logs 1",
+            property_type="departamento",
+        )
+        assert prop_id is not None
+        log_store.append(
+            property_id=str(prop_id),
+            field_changed="rent_price_ars",
+            old_value=None,
+            new_value="150000",
+        )
+        log_store.append(
+            property_id=str(prop_id),
+            field_changed="status",
+            old_value="disponible",
+            new_value="reservado",
+        )
+        entries = log_store.list(property_id=str(prop_id))
+        assert len(entries) == 2
+        assert all(isinstance(e, PropertyLog) for e in entries)
+        assert entries[0].field_changed == "rent_price_ars"
+        assert entries[0].old_value is None
+        assert entries[0].new_value == "150000"
+        assert entries[0].changed_by == "sistema", "changed_by should default to 'sistema'"
+        assert entries[1].field_changed == "status"
+        assert entries[1].old_value == "disponible"
+        assert entries[1].new_value == "reservado"
+        # Entries are returned oldest-first.
+        assert [e.field_changed for e in entries] == ["rent_price_ars", "status"]
+    finally:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM properties WHERE reference_code = :r"), {"r": ref}
+            )
+
+
+def test_property_log_store_list_filters_by_property_id(engine):
+    store = PostgresPropertyStore(engine)
+    log_store = PostgresPropertyLogStore(engine)
+    ref_a = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    ref_b = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    try:
+        prop_a = store.create(
+            reference_code=ref_a,
+            address="Av. A 1",
+            property_type="departamento",
+        )
+        prop_b = store.create(
+            reference_code=ref_b,
+            address="Av. B 1",
+            property_type="casa",
+        )
+        assert prop_a is not None and prop_b is not None
+        log_store.append(
+            property_id=str(prop_a),
+            field_changed="status",
+            old_value=None,
+            new_value="reservado",
+        )
+        log_store.append(
+            property_id=str(prop_b),
+            field_changed="status",
+            old_value=None,
+            new_value="pausado",
+        )
+        log_store.append(
+            property_id=str(prop_a),
+            field_changed="address",
+            old_value="Av. A 1",
+            new_value="Av. A 2",
+        )
+        only_a = log_store.list(property_id=str(prop_a))
+        assert [e.field_changed for e in only_a] == ["status", "address"]
+        assert all(e.property_id == str(prop_a) for e in only_a)
+        only_b = log_store.list(property_id=str(prop_b))
+        assert [e.field_changed for e in only_b] == ["status"]
+        all_entries = log_store.list()
+        assert len(all_entries) >= 3
+    finally:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM properties WHERE reference_code IN (:a, :b)"),
+                {"a": ref_a, "b": ref_b},
+            )
+
+
+def test_property_log_store_append_rejects_empty_field_changed(engine):
+    log_store = PostgresPropertyLogStore(engine)
+    with pytest.raises(ValueError, match="field_changed"):
+        log_store.append(
+            property_id="00000000-0000-0000-0000-000000000000",
+            field_changed="",
+            old_value=None,
+            new_value="x",
+        )
 
 
 # ---------------------------------------------------------------------------
