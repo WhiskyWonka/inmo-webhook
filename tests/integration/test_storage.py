@@ -13,7 +13,8 @@ from alembic import command
 from sqlalchemy import create_engine, text
 
 from app.domain.messages import Lead, LeadWithMessages, Message
-from app.storage.postgres import PostgresLeadStore, PostgresPropertyStore
+from app.domain.neighborhoods import Neighborhood, Zone
+from app.storage.postgres import PostgresLeadStore, PostgresNeighborhoodStore, PostgresPropertyStore
 from tests.integration._helpers import (
     _alembic_config,
     _skip_without_database,
@@ -306,3 +307,37 @@ def test_property_store_list_filters_by_property_type(engine):
             conn.execute(
                 text("DELETE FROM properties WHERE reference_code = :r"), {"r": ref}
             )
+
+
+# ---------------------------------------------------------------------------
+# PostgresNeighborhoodStore
+# ---------------------------------------------------------------------------
+
+
+def test_neighborhood_store_list_all(engine):
+    store = PostgresNeighborhoodStore(engine)
+    results = store.list()
+    names = {n.name for n in results}
+    assert "Palermo" in names
+    assert "Tigre" in names
+    assert len(results) == 19, "expected the exact seeded neighborhood set"
+    # City is per-row: CABA rows default to CABA, GBA rows are stored as GBA.
+    assert {n.city for n in results if n.zone == Zone.gba_norte} == {"GBA"}
+    assert {n.city for n in results if n.zone != Zone.gba_norte} == {"CABA"}
+    for n in results:
+        assert isinstance(n, Neighborhood)
+        assert isinstance(n.zone, Zone)
+        assert n.id
+
+
+def test_neighborhood_store_list_filters_by_zone(engine):
+    store = PostgresNeighborhoodStore(engine)
+    gba_norte = store.list(zone="gba_norte")
+    gba_names = {n.name for n in gba_norte}
+    assert {"Vicente López", "San Isidro", "Tigre"} <= gba_names
+    assert all(n.zone == Zone.gba_norte for n in gba_norte)
+    norte = store.list(zone="norte")
+    norte_names = {n.name for n in norte}
+    assert "Palermo" in norte_names
+    assert "Tigre" not in norte_names
+    assert all(n.zone == Zone.norte for n in norte)

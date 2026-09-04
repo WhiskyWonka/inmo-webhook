@@ -17,8 +17,10 @@ from sqlalchemy.engine import Engine
 
 from app.db.models.leads import Lead as LeadModel
 from app.db.models.messages import Message as MessageModel
+from app.db.models.neighborhoods import Neighborhood as NeighborhoodModel
 from app.db.models.properties import Property as PropertyModel
 from app.domain.messages import LeadWithMessages, Message
+from app.domain.neighborhoods import Neighborhood, Zone
 
 # Columns that are set on INSERT but intentionally NOT clobbered by an
 # UPDATE-on-conflict. ``status`` is pipeline state (v_leads_pipeline) and
@@ -178,3 +180,32 @@ class PostgresPropertyStore:
         with self._engine.connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return dict(row) if row else None
+
+
+class PostgresNeighborhoodStore:
+    """Read-only adapter for the seeded ``neighborhoods`` table.
+
+    ``list`` returns domain ``Neighborhood`` objects. When *zone* is given,
+    only neighborhoods in that zone are returned.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def list(self, zone: str | None = None) -> list[Neighborhood]:
+        stmt = select(NeighborhoodModel.__table__).order_by(
+            NeighborhoodModel.__table__.c.name
+        )
+        if zone is not None:
+            stmt = stmt.where(NeighborhoodModel.__table__.c.zone == zone)
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [
+            Neighborhood(
+                id=str(row["id"]),
+                name=row["name"],
+                zone=Zone(row["zone"]),
+                city=row["city"],
+            )
+            for row in rows
+        ]
