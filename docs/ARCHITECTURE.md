@@ -16,8 +16,9 @@ main.py (composition root)
    │     ├── verification.py
    │     ├── messages.py
    │     └── signature.py
-   └── app/storage/           ← Persistence adapters
-         └── lead_log.py
+    └── app/storage/           ← Persistence adapters
+          ├── base.py          ← LeadStore / PropertyStore protocols (web depends on these)
+          └── postgres.py      ← PostgresLeadStore / PostgresPropertyStore (SQLAlchemy)
    └── app/db/                ← Schema metadata for migrations (Alembic/SQLAlchemy Core)
          ├── base.py          ← DeclarativeBase exported for alembic env.py
          └── models/          ← ORM models (neighborhoods, properties, leads)
@@ -38,7 +39,7 @@ main.py (composition root)
 |-------|-------|---------------|-----------------|
 | **Config** | `app/config.py` | Load env vars via pydantic-settings | `pydantic_settings` only |
 | **Domain** | `app/domain/*.py` | Pure business logic, no side effects | stdlib only (no FastAPI, no storage) |
-| **Storage** | `app/storage/*.py` | Persistence adapters (write, read, query) | `app/domain/*` (for data classes) |
+| **Storage** | `app/storage/*.py` | Persistence adapters (write, read, query) | `app/domain/*` (for data classes), `app/db/models/*` (SQLAlchemy models) |
 | **DB (schema)** | `app/db/*.py`, `app/db/models/*.py` | SQLAlchemy Core metadata for Alembic migrations; NOT a runtime storage adapter | `sqlalchemy` only |
 | **Web** | `app/web.py` | HTTP handlers, request/response wiring | `app/config`, `app/domain/*`, `app/storage/*` |
 | **Composition** | `main.py` | Wire everything together, start uvicorn | `app/config`, `app/web` |
@@ -71,7 +72,7 @@ Each module has one reason to change:
 - `domain/verification.py` → changes only when Meta webhook handshake spec changes
 - `domain/messages.py` → changes only when Meta payload format changes
 - `domain/signature.py` → changes only when Meta signature spec changes
-- `storage/lead_log.py` → changes only when persistence format changes
+- `storage/postgres.py` → changes only when persistence behaviour changes
 - `web.py` → changes only when HTTP routing/wiring changes
 
 **Known issue:** `web.py` line 27 uses `print()` instead of `logging`. This is a minor SRP smell — the handler mixes I/O logging with HTTP logic. Fix: inject a logger or use Python's `logging` module. Deferred to a future branch.
@@ -81,7 +82,7 @@ Each module has one reason to change:
 The system is open for extension, closed for modification:
 
 - New parsers can be added to `app/domain/` without modifying existing ones.
-- New storage backends can be added to `app/storage/` without changing `lead_log.py`.
+- New storage backends can be added to `app/storage/` without touching `postgres.py`.
 - New endpoints can be added to `create_app()` without touching existing handlers.
 
 ### L — Liskov Substitution Principle ✅ (N/A)
@@ -92,10 +93,11 @@ No inheritance hierarchies exist in the current codebase. All modules use compos
 
 No bloated interfaces exist. Each module exposes a minimal API:
 
-- `Settings` → 2 fields
-- `LeadLogStore` → `write()` + `path` property
+- `Settings` → 3 fields
+- `LeadStore` (protocol) → `write(parsed: LeadWithMessages)`
+- `PropertyStore` (protocol) → `create()`, `list()`, `find_by_reference_code()`
 - `validate_verification()` → 4 params, returns `int | dict`
-- `parse_whatsapp_payload()` → 1 param, returns `list[Lead]`
+- `parse_whatsapp_payload()` → 1 param, returns `list[LeadWithMessages]`
 
 ### D — Dependency Inversion Principle ✅ RESOLVED
 
@@ -103,33 +105,36 @@ No bloated interfaces exist. Each module exposes a minimal API:
 
 **Why it mattered:** Swapping `LeadLogStore` for a database store would have required modifying `web.py`. The web layer should depend on an abstraction, not a concrete class.
 
-**The fix (implemented):**
+**The fix (implemented, issue #41):**
 
-1. A `Protocol` lives in `app/storage/base.py`:
+1. The `LeadStore` protocol lives in `app/storage/base.py` and evolves to receive the full aggregate:
 
 ```python
 from typing import Protocol
-from app.domain.messages import Lead
+from app.domain.messages import LeadWithMessages
 
 class LeadStore(Protocol):
-    def write(self, lead: Lead) -> None: ...
+    def write(self, parsed: LeadWithMessages) -> None: ...
 ```
 
-2. `create_app()` now takes the store as an injected argument:
+2. `create_app()` takes the store as an injected argument:
 
 ```python
 def create_app(settings: Settings, store: LeadStore) -> FastAPI:
 ```
 
-3. Wiring happens in `main.py` (the composition root):
+3. Wiring happens in `main.py` (the composition root), which constructs the concrete `PostgresLeadStore` from `Settings().database_url`:
 
 ```python
-from app.storage.lead_log import LeadLogStore
-store = LeadLogStore(settings.leads_log_path)
+from app.storage.postgres import PostgresLeadStore
+engine = create_engine(settings.database_url)
+store = PostgresLeadStore(engine)
 app = create_app(settings, store)
 ```
 
-**Status:** RESOLVED. `web.py` no longer imports any concrete store. Any class with matching methods can be injected (see integration test `test_post_uses_injected_store_backend`). New storage backends must implement the `LeadStore` interface.
+`LeadLogStore` (the file-log store) is **retired** as of #41 — leads persist to Postgres only.
+
+**Status:** RESOLVED. `web.py` no longer imports any concrete store. Any class matching the protocol can be injected (see integration test `test_post_uses_injected_store_backend`). New storage backends must implement the `LeadStore` interface.
 
 ---
 
@@ -168,7 +173,7 @@ pytest -q                        # Quiet mode
 ### Adding a New Storage Backend
 
 1. Create `app/storage/new_store.py`
-2. Implement the `LeadStore` interface (define `write(self, lead: Lead) -> None`)
+2. Implement the `LeadStore` interface (define `write(self, parsed: LeadWithMessages) -> None`)
 3. Import and wire in `main.py` — pass the instance to `create_app(settings, store)`
 4. Do NOT modify `web.py` or its imports — it depends only on the `LeadStore` abstraction
 
@@ -219,31 +224,36 @@ non-ASCII as `\uXXXX`, matching Meta).
 ## File Map
 
 ```
-main.py                          → Composition root (10 lines)
+main.py                          → Composition root (wires PostgresLeadStore + uvicorn)
 app/__init__.py                  → Package marker (empty)
 app/config.py                    → Settings (pydantic-settings)
 app/web.py                       → FastAPI create_app + handlers
 app/domain/__init__.py           → Package marker (empty)
 app/domain/verification.py       → Webhook handshake validation
-app/domain/messages.py           → Lead dataclass + payload parser
+app/domain/messages.py           → Lead/Message/LeadWithMessages dataclasses + payload parser
 app/domain/signature.py          → HMAC-SHA256 X-Hub-Signature-256 verification
 app/storage/__init__.py          → Package marker (empty)
-app/storage/lead_log.py          → Append-only log store
+app/storage/base.py              → LeadStore / PropertyStore protocols (DIP)
+app/storage/postgres.py          → PostgresLeadStore / PostgresPropertyStore (SQLAlchemy)
 app/db/__init__.py               → Package marker (imports app.db.models to register schema)
 app/db/base.py                   → DeclarativeBase (Base.metadata) consumed by alembic env.py
 app/db/models/__init__.py        → Package marker; re-exports the ORM models
 app/db/models/neighborhoods.py   → `neighborhoods` table (barrios seeded via migration, issue #37)
 app/db/models/properties.py      → `properties` table (listings, issue #31)
-app/db/models/leads.py           → `leads` table (prospects, issue #31)
+app/db/models/leads.py           → `leads` table (prospects, issue #31; phone UNIQUE)
+app/db/models/messages.py        → `messages` table (per-lead messages; issue #41/#33)
 migrations/env.py                → Alembic env: wires target_metadata + DATABASE_URL
-migrations/versions/             → Migration revision scripts (first schema migration in PR 2)
+migrations/versions/             → Migration revision scripts (schema + v_leads_pipeline view)
 alembic.ini                      → Alembic configuration
 entrypoint.sh                    → Container entrypoint: alembic upgrade head + uvicorn
 tests/__init__.py                → Package marker (empty)
 tests/unit/__init__.py           → Package marker (empty)
-tests/unit/test_verification.py  → 6 domain tests
-tests/unit/test_messages.py      → 6 parser tests
+tests/unit/test_verification.py  → domain handshake tests
+tests/unit/test_messages.py      → parser tests
 tests/unit/test_signature.py     → signature verification tests
+tests/unit/test_db_models.py     → schema-model metadata tests (unit, no DB)
 tests/integration/__init__.py    → Package marker (empty)
-tests/integration/test_webhook.py → HTTP handler tests (GET handshake + POST signed)
+tests/integration/test_webhook.py → HTTP handler tests (GET handshake + POST signed/persisted)
+tests/integration/test_schema.py → schema integration tests (DB-backed)
+tests/integration/test_storage.py → Postgres store adapter tests (DB-backed)
 ```

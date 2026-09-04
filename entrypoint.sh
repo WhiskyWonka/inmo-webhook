@@ -5,8 +5,10 @@
 #    properties, leads, and neighborhoods tables (with triggers and seed data).
 # 2. Starts the FastAPI application with uvicorn.
 #
-# If DATABASE_URL is not set, migrations are skipped and the server still
-# starts so the webhook can run without a database (e.g. local development).
+# DATABASE_URL is required: main.py raises a ValueError at startup if it is
+# empty (the file-log store is retired and Postgres is mandatory), so a missing
+# DATABASE_URL here is a misconfiguration, not an optional path. Migrations are
+# only skipped when DATABASE_URL is unset on an env where it is not needed.
 set -euo pipefail
 
 if [ -z "${DATABASE_URL:-}" ]; then

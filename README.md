@@ -1,69 +1,71 @@
 # inmo-webhook
 
-A minimal FastAPI webhook server that receives WhatsApp Cloud API messages and logs each incoming lead to a local file.
+A minimal FastAPI webhook server that receives WhatsApp Cloud API messages and persists incoming leads (and their messages) to Postgres.
 
 ## Overview
 
-This server acts as a lead-capture endpoint for WhatsApp Business messaging. It exposes a single webhook endpoint that handles both the Meta verification handshake (GET) and incoming message delivery (POST). For every incoming message from the `whatsapp_business_account` object, it extracts the sender's phone number and message text, then appends a timestamped line to `/app/data/leads.log`.
+This server acts as a lead-capture endpoint for WhatsApp Business messaging. It exposes a single webhook endpoint that handles both the Meta verification handshake (GET) and incoming message delivery (POST). For every incoming message from the `whatsapp_business_account` object, it extracts the sender's phone number and message text, upserts a lead (keyed by phone) into Postgres and appends the message with the lead.
 
-The server is intentionally minimal -- a single Python file with no database, no authentication layer beyond webhook verification, and no message queue. It is designed to be deployed behind a reverse proxy or load balancer that terminates TLS.
+The server is intentionally minimal -- a single entrypoint with no messaging queue or background workers. It is designed to be deployed behind a reverse proxy or load balancer that terminates TLS. Persistence is relational (schema managed by Alembic) via injected `PostgresLeadStore`; the web layer depends only on the `LeadStore` protocol (DIP).
 
 ## Technologies
 
 - **Python 3.11** -- runtime
 - **FastAPI** -- HTTP framework; handles routing, request parsing, and JSON serialization
 - **Uvicorn** -- ASGI server; runs the FastAPI application
+- **PostgreSQL** -- persistent store for leads, properties, neighborhoods, and messages
 - **Alembic** -- database migration engine (schema management)
-- **SQLAlchemy Core** -- metadata/schema layer consumed by Alembic
+- **SQLAlchemy** -- ORM models for schema + runtime storage adapters
 - **Docker** -- containerization; builds a reproducible image based on `python:3.11-slim`
 
 ## Project structure
 
 ```
 inmo-webhook/
-├── main.py                 # Composing: Settings → create_app → uvicorn entrypoint
+├── main.py                 # Composing: Settings → PostgresLeadStore → create_app → uvicorn
 ├── app/
 │   ├── config.py           # Settings (pydantic-settings): verify_token, app_secret, database_url
 │   ├── domain/
-│   │   ├── messages.py     # Lead model + WhatsApp payload parser
+│   │   ├── messages.py     # Lead/Message/LeadWithMessages models + WhatsApp payload parser
 │   │   └── verification.py # Handshake validation logic (token + challenge)
 │   ├── storage/
-│   │   └── lead_log.py     # LeadLogStore: injected path, ensures dir, writes formatted line
+│   │   ├── base.py         # LeadStore / PropertyStore protocols (DIP — web depends on these)
+│   │   └── postgres.py     # PostgresLeadStore / PostgresPropertyStore (SQLAlchemy 2.0)
 │   ├── db/
 │   │   ├── base.py         # DeclarativeBase (Base.metadata) for Alembic migrations
-│   │   └── models/         # ORM models: neighborhoods.py, properties.py, leads.py
+│   │   └── models/         # ORM models: neighborhoods.py, properties.py, leads.py, messages.py
 │   └── web.py              # FastAPI handlers (GET/POST /webhook) — thin, delegates to domain/storage
 ├── migrations/
 │   ├── env.py              # Alembic env: target_metadata + DATABASE_URL wiring
-│   └── versions/           # Migration revision scripts
+│   └── versions/           # Migration revision scripts (schema + v_leads_pipeline view)
 ├── alembic.ini             # Alembic configuration
 ├── entrypoint.sh           # Container entrypoint: alembic upgrade head + uvicorn
 ├── tests/
 │   ├── unit/
-│   │   ├── test_verification.py   # Pure validation tests — no FastAPI, no filesystem
-│   │   └── test_messages.py       # Pure parser tests — no FastAPI, no filesystem
+│   │   ├── test_verification.py   # Pure validation tests — no FastAPI, no DB
+│   │   ├── test_messages.py       # Pure parser tests — no FastAPI, no DB
+│   │   └── test_db_models.py      # Schema-model metadata tests — no DB
 │   └── integration/
-│       ├── test_webhook.py        # TestClient against the real app (Settings injected)
-│       └── test_migrations.py     # Alembic smoke test (runs `upgrade head`, skips without DB)
+│       ├── test_webhook.py        # TestClient against the real app (handshake/signature + persist)
+│       ├── test_schema.py         # Schema integration tests (DB-backed)
+│       └── test_storage.py        # Postgres store adapter tests (DB-backed)
 ├── Dockerfile              # Container build; runs alembic upgrade head + uvicorn via entrypoint
-├── requirements.txt        # Runtime dependencies (fastapi, uvicorn, pydantic-settings, sqlalchemy, alembic)
+├── requirements.txt        # Runtime dependencies (fastapi, uvicorn, pydantic-settings, sqlalchemy, alembic, psycopg)
 ├── requirements-dev.txt    # Dev/test dependencies (pytest, httpx, ruff)
 ├── pyproject.toml          # Ruff config + pytest pythonpath
-├── .gitignore              # Ignores /data/ logs, __pycache__, pytest/ruff caches
-└── data/
-    └── leads.log           # Runtime output: timestamp | phone | message (NOT committed)
+└── .gitignore              # Ignore /data/ logs, __pycache__, pytest/ruff caches
 ```
 
 ## Architecture
 
 The app follows a layered structure with clear responsibility boundaries:
 
-- **`app/config.py`** — settings via `pydantic-settings`. Reads `VERIFY_TOKEN` and `LEADS_LOG_PATH` from env vars at instantiation time (not import time), eliminating the `importlib.reload` hack in tests.
-- **`app/domain/`** — pure logic, no framework dependency. `verification.py` handles the Meta handshake validation. `messages.py` parses the nested WhatsApp payload into `Lead` dataclasses.
-- **`app/storage/`** — persistence. `LeadLogStore` takes an injected path, ensures the directory once at construction, and writes formatted log lines.
-- **`app/db/`** — schema metadata for migrations. `base.py` defines the SQLAlchemy `DeclarativeBase` consumed by `migrations/env.py`; `models/` defines the `neighborhoods`, `properties`, and `leads` ORM tables. This is migration infrastructure, not a runtime storage adapter — runtime persistence still flows through the injected `LeadStore`.
-- **`app/web.py`** — thin FastAPI layer. Delegates to domain/storage. The `create_app(settings)` factory wires everything together.
-- **`main.py`** — minimal composition: instantiates `Settings()`, calls `create_app(settings)`, exposes `app` for uvicorn.
+- **`app/config.py`** — settings via `pydantic-settings`. Reads `VERIFY_TOKEN`, `APP_SECRET`, and `DATABASE_URL` from env vars at instantiation time (not import time), eliminating the `importlib.reload` hack in tests.
+- **`app/domain/`** — pure logic, no framework dependency. `verification.py` handles the Meta handshake validation. `messages.py` parses the nested WhatsApp payload into `LeadWithMessages` aggregates (`Lead` keyed by phone + its `Message` list).
+- **`app/storage/`** — persistence adapters. `base.py` defines the `LeadStore` / `PropertyStore` protocols; `postgres.py` implements them on top of SQLAlchemy (`PostgresLeadStore`, `PostgresPropertyStore`). `PostgresLeadStore.write` upserts the lead by phone and appends its messages in one transaction.
+- **`app/db/`** — schema metadata for migrations. `base.py` defines the SQLAlchemy `DeclarativeBase` consumed by `migrations/env.py`; `models/` defines the `neighborhoods`, `properties`, `leads`, and `messages` ORM tables. This is schema infrastructure; runtime persistence flows through the injected store.
+- **`app/web.py`** — thin FastAPI layer. Delegates to domain/storage. The `create_app(settings, store)` factory takes an injected store (DIP).
+- **`main.py`** — composition root: instantiates `Settings()`, builds `PostgresLeadStore` from `database_url`, calls `create_app(settings, store)`, exposes `app` for uvicorn.
 
 This separation means domain logic and parser can be tested in isolation (no FastAPI, no `importlib.reload`), and persistence can be swapped out without touching HTTP handlers.
 
@@ -87,8 +89,11 @@ pip install -r requirements.txt
 # Set the verification token (used for the Meta webhook handshake)
 export VERIFY_TOKEN="your_secret_token_here"
 
-# Ensure the data directory exists
-mkdir -p data
+# Point at a Postgres database (required — the log-file store is retired)
+export DATABASE_URL="postgresql+psycopg://user:pass@localhost:5432/inmobot"
+
+# Apply the schema
+alembic upgrade head
 
 # Start the server
 uvicorn main:app --host 0.0.0.0 --port 8000
@@ -97,6 +102,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 The webhook endpoint will be available at `http://localhost:8000/webhook`.
 
 If `VERIFY_TOKEN` is not set, it defaults to an empty string. The Meta handshake will fail because the empty token will not match what you configure in the Meta dashboard.
+
+`DATABASE_URL` is **required** at startup: since `LeadLogStore` was retired (issue #41), `main.py` raises a clear error if `DATABASE_URL` is empty instead of starting without persistence.
 
 ## Running with Docker
 
@@ -112,22 +119,25 @@ docker build -t inmo-webhook .
 docker run -d \
   -p 8000:8000 \
   -e VERIFY_TOKEN="your_secret_token_here" \
-  -v $(pwd)/data:/app/data \
+  -e DATABASE_URL="postgresql+psycopg://user:pass@db:5432/inmobot" \
   --name inmo-webhook \
   inmo-webhook
 ```
 
-The `-v $(pwd)/data:/app/data` volume mount maps your local `data/` directory into the container so that `leads.log` persists across container restarts. Without this mount, log data is lost when the container is removed.
+Data is persisted in Postgres (via `DATABASE_URL`); no volume mount for local files is needed.
 
 ## Migrations
 
-Database schema is managed with **Alembic** on top of **SQLAlchemy Core metadata**
-(`app/db/base.py`). The models live in `app/db/models/` (neighborhoods,
-properties, leads) and are registered with `Base.metadata` when `app.db` is
-imported. The first migration (`create properties, leads, neighborhoods tables`)
-creates the three tables, their CHECK/foreign-key constraints and indexes, the
-`update_updated_at_column()` function plus the two `updated_at` triggers, and
-seeds the 19 barrios into `neighborhoods`.
+Database schema is managed with **Alembic** on top of **SQLAlchemy** models
+(`app/db/models/`: neighborhoods, properties, leads, messages) registered with
+`Base.metadata` when `app.db` is imported. The migrations:
+
+- `0184e017b2a8` — creates `neighborhoods`, `properties`, `leads`; the
+  `update_updated_at_column()` function and its two triggers; seeds the 19
+  barrios (issue #31/#37).
+- `e4b438d3a245` — creates the `messages` table, makes `leads.phone` UNIQUE
+  (backing the phone-keyed upsert), and adds the `v_leads_pipeline` view
+  (issue #41, with the `messages` table overlapping issue #33).
 
 ### Applying migrations
 
@@ -139,7 +149,8 @@ alembic upgrade head
 
 `alembic upgrade head` runs automatically on container startup via
 `entrypoint.sh` before uvicorn starts. If `DATABASE_URL` is not set, the
-entrypoint skips migrations and still starts the server.
+entrypoint skips migrations and the app fails fast because `main.py` requires
+a database.
 
 ### Generating a new migration
 
@@ -191,21 +202,19 @@ Without subscribing to the `messages` field, your server will never receive POST
 
 The verify token is only used during the ownership handshake. It is not the same as the App Secret, which is used to sign webhook payloads (see Security considerations below).
 
-## Payload and log format
+## Payload and persistence
 
-### Log line format
+### How leads and messages are stored
 
-Each line in `data/leads.log` follows this format:
+Every incoming message from a distinct sender phone upserts a `leads` row
+(keyed by `phone`) and appends a `messages` row referencing that lead. The
+storage adapter (`PostgresLeadStore.write(parsed: LeadWithMessages)`) does the
+upsert + message append atomically in a single transaction. Message inserts are
+idempotent via the unique `external_id`: a re-delivered message with an
+already-stored external id is skipped rather than duplicated.
 
-```
-2026-08-26T18:44:14.980000 | 16315551181 | this is a text message
-```
-
-| Field         | Description                              |
-|---------------|------------------------------------------|
-| timestamp     | ISO 8601 timestamp of when the message was processed (`datetime.now().isoformat()`) |
-| phone number  | Sender's phone number (from `msg["from"]`) |
-| message body  | Text content of the message (from `msg["text"]["body"]`) |
+A `v_leads_pipeline` SQL view exposes each lead's pipeline stage (`status`,
+`qualification_score`) plus a `message_count` for reporting.
 
 ### Webhook payload structure
 
@@ -235,9 +244,9 @@ Meta sends a JSON payload to `POST /webhook` with this nested structure. The ser
 }
 ```
 
-The server checks that the top-level `object` is `whatsapp_business_account`, then iterates `entry[].changes[].value.messages[]` to extract each message's `from` (phone number) and `text.body` (message text). Messages without a `text` field (e.g., image or audio messages) will have an empty body in the log.
+The server checks that the top-level `object` is `whatsapp_business_account`, then iterates `entry[].changes[].value.messages[]` to extract each message's `from` (phone number) and `text.body` (message text). It groups messages by sender phone into `LeadWithMessages` aggregates and persists each one. Messages without a `text` field (e.g., image or audio messages) have an empty content body.
 
-The POST handler returns `{"status": "ok"}` for all requests, including payloads that do not match the expected structure. Non-matching payloads are silently ignored (no log entry, no error).
+The POST handler returns `{"status": "ok"}` for all requests, including payloads that do not match the expected structure. Non-matching payloads are silently ignored (no lead is written, no error).
 
 ## Security considerations and known gaps
 
@@ -248,34 +257,24 @@ The POST handler returns `{"status": "ok"}` for all requests, including payloads
 | Verify Token    | Proves ownership during the webhook handshake    | `GET /webhook` query param, compared against `VERIFY_TOKEN` env var |
 | App Secret      | Signs webhook payloads (HMAC-SHA256)             | Should be validated on incoming `POST /webhook` -- **currently not implemented** |
 
-### Known gap: no payload signature validation
+### Payload signature validation
 
-The `POST /webhook` handler does **not** verify the `X-Hub-Signature-256` header that Meta includes on every webhook delivery. This header contains an HMAC-SHA256 signature computed using the App Secret and the raw request body. Without validating this signature, any party that can reach your endpoint can forge a POST request with arbitrary data and create fake lead entries.
-
-**This is the most significant security gap in the current implementation.** To fix it:
-
-1. Store the App Secret in an environment variable (e.g., `APP_SECRET`).
-2. Compute the HMAC-SHA256 of the raw request body using that secret.
-3. Compare it to the `X-Hub-Signature-256` header using a constant-time comparison (e.g., `hmac.compare_digest` in Python) to prevent timing attacks.
-4. Reject requests where the signature does not match.
-
-A constant-time comparison is critical -- a standard `==` comparison leaks information about the correct signature through response timing.
+The `POST /webhook` handler **verifies** the `X-Hub-Signature-256` header that Meta includes on every webhook delivery. This header contains an HMAC-SHA256 signature computed using the App Secret and the raw request body. The HMAC is computed over the exact raw request bytes (`await request.body()`) before JSON parsing, and compared with `hmac.compare_digest` (constant-time) to prevent timing attacks. Requests whose signature does not match, or which omit the header, are rejected with HTTP 403.
 
 ### Sensitive data
 
-`data/leads.log` contains real phone numbers and message content, which constitute personal data under most privacy regulations. The file is:
+The database stores real phone numbers and message content, which constitute personal data under most privacy regulations. The rows are:
 
-- Excluded from version control via `.gitignore` (`/data/` directory)
-- Persisted via Docker volume mount, not baked into the container image
+- Stored in Postgres (via `DATABASE_URL`), never in version-controlled files
+- Not baked into the container image
 
-Do not commit this file to any repository. Do not expose it through a web server or file share. Apply appropriate access controls and retention policies as required by your jurisdiction.
+Apply appropriate access controls (DB credentials, network isolation) and retention policies as required by your jurisdiction.
 
 ### Other gaps
 
 - **No HTTPS**: The server itself does not terminate TLS. Deploy behind a reverse proxy (nginx, Caddy, cloud load balancer) that handles TLS termination.
 - **No rate limiting**: The endpoint accepts unlimited requests. Consider rate limiting at the reverse proxy level.
-- **No persistence beyond the log file**: Messages are written to a flat file. For any production use case beyond simple lead capture, a database or message queue is recommended.
-- **No structured error handling**: If `leads.log` is not writable (e.g., the `/app/data` directory does not exist and no volume is mounted), the server will raise an unhandled exception and return a 500 error to Meta. The log line also assumes `msg["from"]` always exists, which will raise a `KeyError` on malformed payloads.
+- **No structured error handling**: If the database is unreachable, `store.write` raises and the handler returns a 500 error to Meta. Consider a bounded retry or a queue if durability is critical.
 
 ## Local development
 
@@ -305,14 +304,22 @@ Ruff is configured in `pyproject.toml` with `line-length = 100` and checks for p
 pytest -q
 ```
 
-The test suite in `tests/test_webhook.py` covers four scenarios: the Meta verification handshake (valid and invalid token), a valid WhatsApp payload writing a correctly-formatted log line, and an unrelated payload being silently ignored.
-
-The log path defaults to `/app/data/leads.log`. To avoid writing to that path during local development or testing, set the `LEADS_LOG_PATH` environment variable:
+The test suite is split into **unit** suites (pure domain, schema metadata — no DB
+needed) and **integration** suites (HTTP handlers via `TestClient`, plus
+DB-backed store/schema tests). The handshake, signature, and request-shaping
+tests use an in-memory store and run anywhere. The Postgres-backed persistence
+tests (in `tests/integration/test_storage.py`, `tests/integration/test_schema.py`,
+and part of `tests/integration/test_webhook.py`) run only when `DATABASE_URL` is
+set; locally they are skipped:
 
 ```bash
-export LEADS_LOG_PATH=./leads.log
-```
+# Local, no DB: unit + handshake/signature tests only
+pytest -q
 
-Note that tests already override this via `monkeypatch.setenv` and `tmp_path`, so each test writes to an isolated temporary file. You only need to set the variable if you are running the server locally outside the test suite.
+# Full suite against a real Postgres (as CI runs it)
+export DATABASE_URL="postgresql+psycopg://user:pass@localhost:5432/inmobot"
+alembic upgrade head
+pytest -q
+```
 
 For the repository workflow (GitFlow branching, branch protection, and commit conventions), see [docs/GITFLOW.md](docs/GITFLOW.md).
