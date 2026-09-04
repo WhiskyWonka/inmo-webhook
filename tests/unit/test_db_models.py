@@ -7,7 +7,7 @@ foreign keys, and server defaults that the migration pipeline relies on.
 
 from sqlalchemy import CheckConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.types import Boolean, Date, DateTime, Integer, Numeric, String
+from sqlalchemy.types import Boolean, Date, DateTime, Integer, Numeric, String, Text
 
 import app.db  # noqa: F401 — ensures all models are registered
 from app.db.base import Base
@@ -32,11 +32,12 @@ def _quoted_literal_count(ck: CheckConstraint) -> int:
 # --------------------------------------------------------------------------
 
 
-def test_all_three_tables_registered_in_base_metadata():
-    """Base.metadata must see the three model tables."""
+def test_all_four_tables_registered_in_base_metadata():
+    """Base.metadata must see the model tables."""
     assert "neighborhoods" in Base.metadata.tables
     assert "properties" in Base.metadata.tables
     assert "leads" in Base.metadata.tables
+    assert "messages" in Base.metadata.tables
 
 
 # --------------------------------------------------------------------------
@@ -263,4 +264,86 @@ def test_leads_indexes():
     assert "ix_leads_property_id" in indexes
     assert "ix_leads_source" in indexes
     assert "ix_leads_created_at" in indexes
-    assert "ix_leads_phone" in indexes
+    # The redundant non-unique phone index was replaced by a UNIQUE constraint.
+    assert "ix_leads_phone" not in indexes
+
+
+def test_leads_phone_is_unique():
+    """Phone is the domain identity — the model declares UNIQUE via uq_leads_phone."""
+    from sqlalchemy import UniqueConstraint
+
+    table = Base.metadata.tables["leads"]
+    uniques = [
+        uc
+        for uc in table.constraints
+        if isinstance(uc, UniqueConstraint) and list(uc.columns) == [table.c.phone]
+    ]
+    assert len(uniques) == 1
+    assert uniques[0].name == "uq_leads_phone"
+
+
+# --------------------------------------------------------------------------
+# messages
+# --------------------------------------------------------------------------
+
+
+def test_messages_columns_and_types():
+    table = Base.metadata.tables["messages"]
+    assert isinstance(table.c.id.type, UUID)
+    assert isinstance(table.c.lead_id.type, UUID)
+    assert isinstance(table.c.direction.type, String)
+    assert table.c.direction.type.length == 20
+    assert isinstance(table.c.content.type, Text)
+    assert isinstance(table.c.message_type.type, String)
+    assert table.c.message_type.type.length == 30
+    assert isinstance(table.c.external_id.type, String)
+    assert table.c.external_id.type.length == 100
+    assert isinstance(table.c.raw_payload.type, JSONB)
+    assert isinstance(table.c.received_at.type, DateTime)
+    assert isinstance(table.c.created_at.type, DateTime)
+
+
+def test_messages_not_null_and_defaults():
+    table = Base.metadata.tables["messages"]
+    assert table.c.id.server_default.arg.text == "gen_random_uuid()"
+    assert not table.c.lead_id.nullable
+    assert not table.c.direction.nullable
+    assert not table.c.content.nullable
+    assert not table.c.message_type.nullable
+    assert not table.c.received_at.nullable
+    assert not table.c.created_at.nullable
+    assert table.c.external_id.nullable
+    assert table.c.raw_payload.server_default.arg.text == "'{}'::jsonb"
+    assert table.c.received_at.server_default.arg.text == "CURRENT_TIMESTAMP"
+
+
+def test_messages_foreign_key_to_leads_cascade():
+    table = Base.metadata.tables["messages"]
+    fks = [fk for fk in table.foreign_keys]
+    assert len(fks) == 1
+    fk = fks[0]
+    assert fk.parent.key == "lead_id"
+    assert fk.column.table.name == "leads"
+    assert fk.ondelete == "CASCADE"
+
+
+def test_messages_external_id_unique_for_idempotency():
+    """external_id is nullable-unique so re-delivered messages are deduplicated."""
+    from sqlalchemy import UniqueConstraint
+
+    table = Base.metadata.tables["messages"]
+    uniques = [
+        uc
+        for uc in table.constraints
+        if isinstance(uc, UniqueConstraint) and list(uc.columns) == [table.c.external_id]
+    ]
+    assert len(uniques) == 1
+
+
+def test_messages_check_constraints():
+    ck = _check_constraints("messages")
+    assert "ck_messages_direction" in ck
+    assert "ck_messages_message_type" in ck
+    assert "inbound" in ck["ck_messages_direction"].sqltext.text
+    assert "outbound" in ck["ck_messages_direction"].sqltext.text
+    assert "interactive" in ck["ck_messages_message_type"].sqltext.text

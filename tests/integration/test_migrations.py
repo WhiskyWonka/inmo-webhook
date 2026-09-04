@@ -6,16 +6,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-
-def _skip_without_database() -> None:
-    """Skip the migrations tests unless a database URL is configured.
-
-    This lets the suite run locally without a database: the migration smoke
-    tests only exercise the migration pipeline when a Postgres instance is
-    actually reachable (e.g. CI or a configured DATABASE_URL).
-    """
-    if not os.environ.get("DATABASE_URL"):
-        pytest.skip("DATABASE_URL not set — skipping Alembic migration smoke test")
+from tests.integration._helpers import _skip_without_database
 
 
 def _run_upgrade_head() -> None:

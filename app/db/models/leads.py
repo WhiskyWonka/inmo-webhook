@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -99,5 +100,7 @@ class Lead(Base):
         Index("ix_leads_property_id", "property_id"),
         Index("ix_leads_source", "source"),
         Index("ix_leads_created_at", "created_at"),
-        Index("ix_leads_phone", "phone"),
+        # Phone is the domain identity (one lead per phone). A UNIQUE
+        # constraint backs the upsert keyed by phone in PostgresLeadStore.write.
+        UniqueConstraint("phone", name="uq_leads_phone"),
     )
