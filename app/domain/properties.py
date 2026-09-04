@@ -13,3 +13,7 @@ class PropertyLog:
     old_value: str | None
     new_value: str | None
     changed_by: str = "sistema"
+
+    def __post_init__(self) -> None:
+        if not self.field_changed.strip():
+            raise ValueError("field_changed must be a non-empty string")

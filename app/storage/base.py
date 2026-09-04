@@ -55,7 +55,9 @@ class PropertyLogStore(Protocol):
 
     Entries are written as a side-effect of property updates (the triggers
     that populate it are out of scope); this adapter provides the
-    persistence scaffolding.
+    persistence scaffolding. ``list`` returns entries ordered oldest-first
+    by created_at, with id as tiebreaker for rows written in the same
+    transaction.
     """
 
     def append(

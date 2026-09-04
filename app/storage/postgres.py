@@ -253,7 +253,8 @@ class PostgresPropertyLogStore:
 
     def list(self, property_id: str | None = None) -> list[PropertyLog]:
         stmt = select(PropertyLogModel.__table__).order_by(
-            PropertyLogModel.__table__.c.created_at
+            PropertyLogModel.__table__.c.created_at,
+            PropertyLogModel.__table__.c.id,
         )
         if property_id is not None:
             stmt = stmt.where(
