@@ -10,26 +10,10 @@ import time
 
 import pytest
 from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
-
-def _skip_without_database() -> None:
-    if not os.environ.get("DATABASE_URL"):
-        pytest.skip("DATABASE_URL not set — skipping schema integration test")
-
-
-def _alembic_config() -> Config:
-    """Build an Alembic Config from an absolute path to alembic.ini.
-
-    Deriving the path from ``__file__`` keeps this robust regardless of the
-    process working directory (e.g. when pytest runs from a subdirectory).
-    """
-    ini_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "alembic.ini"
-    )
-    return Config(os.path.abspath(ini_path))
+from tests.integration._helpers import _alembic_config, _skip_without_database
 
 
 @pytest.fixture(scope="module")
@@ -41,7 +25,7 @@ def engine():
     return create_engine(os.environ["DATABASE_URL"])
 
 
-def test_three_tables_exist(engine):
+def test_four_tables_exist(engine):
     with engine.connect() as conn:
         rows = conn.execute(
             text(
@@ -50,7 +34,7 @@ def test_three_tables_exist(engine):
             )
         ).fetchall()
     names = {row[0] for row in rows}
-    assert {"neighborhoods", "properties", "leads"}.issubset(names)
+    assert {"neighborhoods", "properties", "leads", "messages"}.issubset(names)
 
 
 def test_neighborhoods_seeded_19_rows(engine):
@@ -252,9 +236,9 @@ def test_upgrade_downgrade_roundtrip():
             )
         ).fetchall()
         names = {row[0] for row in tables}
-        assert not {"neighborhoods", "properties", "leads"}.intersection(names), (
-            "app tables still present after downgrade base"
-        )
+        assert not {"neighborhoods", "properties", "leads", "messages"}.intersection(
+            names
+        ), "app tables still present after downgrade base"
         version = conn.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar()
@@ -269,14 +253,15 @@ def test_upgrade_downgrade_roundtrip():
             )
         ).fetchall()
         names = {row[0] for row in tables}
-        assert {"neighborhoods", "properties", "leads"}.issubset(names)
+        assert {"neighborhoods", "properties", "leads", "messages"}.issubset(names)
         count = conn.execute(text("SELECT count(*) FROM neighborhoods")).scalar_one()
         assert count == 19
-        # A downgrade/upgrade cycle must also recreate the new index.
+        # A downgrade/upgrade cycle must recreate the phone UNIQUE constraint
+        # (which owns a unique index named uq_leads_phone).
         idx = conn.execute(
             text(
                 "SELECT indexname FROM pg_indexes "
-                "WHERE tablename = 'leads' AND indexname = 'ix_leads_phone'"
+                "WHERE tablename = 'leads' AND indexname = 'uq_leads_phone'"
             )
         ).scalar_one_or_none()
-        assert idx == "ix_leads_phone"
+        assert idx == "uq_leads_phone"
