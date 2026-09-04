@@ -2,19 +2,33 @@
 
 Uses TestClient against the real app. Settings are injected directly —
 no importlib.reload, no monkeypatch.setenv.
+
+The handshake, signature, and request-shaping tests use an in-memory
+``FakeStore`` so they run without a database. The persistence tests that
+exercise the real ``PostgresLeadStore`` are gated on ``DATABASE_URL`` (they
+run in CI against Postgres).
 """
 
 import hashlib
 import hmac
 import json
-import re
+import os
+import uuid
 
 import pytest
+from alembic import command
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 
 from app.config import Settings
-from app.storage.lead_log import LeadLogStore
+from app.domain.messages import LeadWithMessages
+from app.storage.postgres import PostgresLeadStore
 from app.web import create_app
+from tests.integration._helpers import (
+    _alembic_config,
+    _skip_without_database,
+    _unique_phone,
+)
 
 VALID_TOKEN = "test_token"
 APP_SECRET = "test-app-secret"
@@ -28,7 +42,9 @@ WHATSAPP_PAYLOAD = {
                     "value": {
                         "messages": [
                             {
+                                "id": "wamid.ABCD1234",
                                 "from": "16315551181",
+                                "type": "text",
                                 "text": {"body": "this is a text message"},
                             }
                         ]
@@ -53,18 +69,39 @@ def _signed_post(tc: TestClient, payload: dict, secret: str = APP_SECRET):
     return tc.post("/webhook", content=body, headers=headers)
 
 
+class FakeStore:
+    """In-memory store matching the evolved LeadStore protocol (LeadWithMessages)."""
+
+    def __init__(self):
+        self.written: list[LeadWithMessages] = []
+
+    def write(self, parsed: LeadWithMessages) -> None:
+        self.written.append(parsed)
+
+
 @pytest.fixture
-def client(tmp_path):
-    """Return a TestClient wired to a per-test log path and verify token."""
-    log_file = tmp_path / "leads.log"
-    settings = Settings(
-        verify_token=VALID_TOKEN, app_secret=APP_SECRET, leads_log_path=str(log_file)
-    )
-    store = LeadLogStore(settings.leads_log_path)
-    app = create_app(settings, store)
+def client():
+    """Return a TestClient wired to an in-memory FakeStore and verify token."""
+    settings = Settings(verify_token=VALID_TOKEN, app_secret=APP_SECRET)
+    fake = FakeStore()
+    app = create_app(settings, fake)
     tc = TestClient(app)
-    tc.log_file = log_file
+    tc.store = fake
     return tc
+
+
+@pytest.fixture(scope="module")
+def pg_engine():
+    """Run migrations to head and return an engine; skip without DATABASE_URL."""
+    _skip_without_database()
+    cfg = _alembic_config()
+    command.upgrade(cfg, "head")
+    return create_engine(os.environ["DATABASE_URL"])
+
+
+# ---------------------------------------------------------------------------
+# Handshake (Meta verification)
+# ---------------------------------------------------------------------------
 
 
 def test_verify_handshake_returns_challenge(client):
@@ -109,88 +146,33 @@ def test_verify_handshake_rejects_bad_token(client):
     assert response.text == ""
 
 
-@pytest.mark.skip(reason="#41 — parser/web/storage incompatible with new domain")
-def test_post_uses_injected_store_backend(tmp_path):
-    """A custom LeadStore backend can be injected into create_app (DIP)."""
-    from app.domain.messages import Lead
-
-    class FakeStore:
-        def __init__(self):
-            self.written: list[Lead] = []
-
-        def write(self, lead: Lead) -> None:
-            self.written.append(lead)
-
-    settings = Settings(
-        verify_token=VALID_TOKEN,
-        app_secret=APP_SECRET,
-        leads_log_path=str(tmp_path / "x.log"),
+def test_verify_handshake_missing_challenge_returns_400(client):
+    """Missing hub.challenge must not crash — returns HTTP 400 (issue #1)."""
+    response = client.get(
+        "/webhook",
+        params={"hub.mode": "subscribe", "hub.verify_token": VALID_TOKEN},
     )
-    fake = FakeStore()
-    app = create_app(settings, fake)
-    tc = TestClient(app)
-
-    response = _signed_post(tc, WHATSAPP_PAYLOAD)
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-    assert len(fake.written) == 1
-    assert fake.written[0].phone == "16315551181"
-    assert fake.written[0].text == "this is a text message"
+    assert response.status_code == 400
+    assert response.text == ""
 
 
-@pytest.mark.skip(reason="#41 — parser/web/storage incompatible with new domain")
-def test_post_valid_payload_writes_log_line(client):
-    """POST /webhook with a WhatsApp payload writes one formatted log line."""
-    response = _signed_post(client, WHATSAPP_PAYLOAD)
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-    lines = client.log_file.read_text().strip().splitlines()
-    assert len(lines) == 1
-
-    ts_part, phone_part, text_part = lines[0].split(" | ")
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?", ts_part)
-    assert phone_part == "16315551181"
-    assert text_part == "this is a text message"
+def test_verify_handshake_bad_mode_returns_400(client):
+    """A non-subscribe mode returns HTTP 400."""
+    response = client.get(
+        "/webhook",
+        params={
+            "hub.mode": "other",
+            "hub.verify_token": VALID_TOKEN,
+            "hub.challenge": "987654",
+        },
+    )
+    assert response.status_code == 400
+    assert response.text == ""
 
 
-def test_post_unrelated_payload_writes_no_log(client):
-    """POST /webhook with a non-WhatsApp object is ignored, log stays empty."""
-    response = _signed_post(client, {"object": "something_else"})
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-    assert not client.log_file.exists()
-
-
-@pytest.mark.skip(reason="#41 — parser/web/storage incompatible with new domain")
-def test_post_multiple_messages_writes_all_log_lines(client):
-    """POST /webhook with multiple messages writes one line per message."""
-    payload = {
-        "object": "whatsapp_business_account",
-        "entry": [
-            {
-                "changes": [
-                    {
-                        "value": {
-                            "messages": [
-                                {"from": "16315551181", "text": {"body": "first"}},
-                                {"from": "5491100001111", "text": {"body": "second"}},
-                            ]
-                        }
-                    }
-                ]
-            }
-        ],
-    }
-
-    response = _signed_post(client, payload)
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-    lines = client.log_file.read_text().strip().splitlines()
-    assert len(lines) == 2
-    assert lines[0].endswith("| 16315551181 | first")
-    assert lines[1].endswith("| 5491100001111 | second")
+# ---------------------------------------------------------------------------
+# Request shaping / signature
+# ---------------------------------------------------------------------------
 
 
 def test_post_missing_signature_returns_403(client):
@@ -239,25 +221,134 @@ def test_post_invalid_json_with_valid_signature_returns_400(client):
     assert response.text == ""
 
 
-def test_verify_handshake_missing_challenge_returns_400(client):
-    """Missing hub.challenge must not crash — returns HTTP 400 (issue #1)."""
-    response = client.get(
-        "/webhook",
-        params={"hub.mode": "subscribe", "hub.verify_token": VALID_TOKEN},
-    )
-    assert response.status_code == 400
-    assert response.text == ""
+def test_post_unrelated_payload_writes_nothing(client):
+    """POST /webhook with a non-WhatsApp object is ignored — nothing written."""
+    response = _signed_post(client, {"object": "something_else"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert client.store.written == []
 
 
-def test_verify_handshake_bad_mode_returns_400(client):
-    """A non-subscribe mode returns HTTP 400."""
-    response = client.get(
-        "/webhook",
-        params={
-            "hub.mode": "other",
-            "hub.verify_token": VALID_TOKEN,
-            "hub.challenge": "987654",
-        },
-    )
-    assert response.status_code == 400
-    assert response.text == ""
+# ---------------------------------------------------------------------------
+# Store injection (DIP) — no DB required
+# ---------------------------------------------------------------------------
+
+
+def test_post_uses_injected_store_backend(client):
+    """A store matching the LeadStore protocol is injected into create_app (DIP)."""
+    response = _signed_post(client, WHATSAPP_PAYLOAD)
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert len(client.store.written) == 1
+    parsed = client.store.written[0]
+    assert isinstance(parsed, LeadWithMessages)
+    assert parsed.lead.phone == "16315551181"
+    assert len(parsed.messages) == 1
+    assert parsed.messages[0].content == "this is a text message"
+
+
+# ---------------------------------------------------------------------------
+# Persistence — real Postgres store (CI)
+# ---------------------------------------------------------------------------
+
+
+def test_post_persists_lead_with_message(pg_engine):
+    """A signed POST persists the lead (upsert by phone) and its message."""
+    store = PostgresLeadStore(pg_engine)
+    settings = Settings(verify_token=VALID_TOKEN, app_secret=APP_SECRET)
+    phone = _unique_phone()
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "id": f"wamid.{uuid.uuid4().hex}",
+                                    "from": phone,
+                                    "type": "text",
+                                    "text": {"body": "hola quiero info"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+    try:
+        client = TestClient(create_app(settings, store))
+        response = _signed_post(client, payload)
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+        with pg_engine.connect() as conn:
+            lead_id, source, status = conn.execute(
+                text("SELECT id, source, status FROM leads WHERE phone = :p"),
+                {"p": phone},
+            ).one()
+            count = conn.execute(
+                text("SELECT count(*) FROM messages WHERE lead_id = :l"),
+                {"l": lead_id},
+            ).scalar_one()
+        assert source == "whatsapp"
+        assert status == "nuevo"
+        assert count == 1
+    finally:
+        with pg_engine.begin() as conn:
+            conn.execute(text("DELETE FROM leads WHERE phone = :p"), {"p": phone})
+
+
+def test_post_multiple_phones_persist_each_lead(pg_engine):
+    """A POST with messages from two phones persists both leads (one upsert each)."""
+    store = PostgresLeadStore(pg_engine)
+    settings = Settings(verify_token=VALID_TOKEN, app_secret=APP_SECRET)
+    phone1 = _unique_phone()
+    phone2 = _unique_phone()
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "id": f"wamid.{uuid.uuid4().hex}",
+                                    "from": phone1,
+                                    "type": "text",
+                                    "text": {"body": "first"},
+                                },
+                                {
+                                    "id": f"wamid.{uuid.uuid4().hex}",
+                                    "from": phone2,
+                                    "type": "text",
+                                    "text": {"body": "second"},
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+    try:
+        client = TestClient(create_app(settings, store))
+        response = _signed_post(client, payload)
+        assert response.status_code == 200
+        with pg_engine.connect() as conn:
+            phones = {
+                row[0]
+                for row in conn.execute(
+                    text("SELECT phone FROM leads WHERE phone IN (:a, :b)"),
+                    {"a": phone1, "b": phone2},
+                ).fetchall()
+            }
+        assert phones == {phone1, phone2}
+    finally:
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM leads WHERE phone IN (:a, :b)"),
+                {"a": phone1, "b": phone2},
+            )
