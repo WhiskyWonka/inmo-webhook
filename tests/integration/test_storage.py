@@ -12,6 +12,7 @@ import uuid
 import pytest
 from alembic import command
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 
 from app.domain.messages import Lead, LeadWithMessages, Message
 from app.domain.neighborhoods import Neighborhood, Zone
@@ -404,7 +405,7 @@ def test_property_log_store_list_filters_by_property_id(engine):
         only_b = log_store.list(property_id=str(prop_b))
         assert [e.field_changed for e in only_b] == ["status"]
         all_entries = log_store.list()
-        assert len(all_entries) >= 3
+        assert {str(prop_a), str(prop_b)} == {e.property_id for e in all_entries}
     finally:
         with engine.begin() as conn:
             conn.execute(
@@ -415,13 +416,102 @@ def test_property_log_store_list_filters_by_property_id(engine):
 
 def test_property_log_store_append_rejects_empty_field_changed(engine):
     log_store = PostgresPropertyLogStore(engine)
+    prop_id = "00000000-0000-0000-0000-000000000000"
     with pytest.raises(ValueError, match="field_changed"):
         log_store.append(
-            property_id="00000000-0000-0000-0000-000000000000",
+            property_id=prop_id,
             field_changed="",
             old_value=None,
             new_value="x",
         )
+    # The rejected append must not persist any row.
+    assert log_store.list(property_id=prop_id) == []
+
+
+def test_property_log_store_list_orders_ties_by_id(engine):
+    """Rows sharing a created_at must come back ordered by id ascending.
+
+    ``CURRENT_TIMESTAMP`` is the transaction start time, so a trigger that
+    writes multiple entries in one transaction yields identical created_at
+    values; the id tiebreaker makes that order deterministic.
+    """
+    store = PostgresPropertyStore(engine)
+    log_store = PostgresPropertyLogStore(engine)
+    ref = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    # Two explicit ids with known ascending order (…0001 < …0002).
+    id_low = "00000000-0000-0000-0000-000000000001"
+    id_high = "00000000-0000-0000-0000-000000000002"
+    ts = "2026-09-04 10:00:00"
+    try:
+        prop_id = store.create(
+            reference_code=ref,
+            address="Av. Ties 1",
+            property_type="departamento",
+        )
+        assert prop_id is not None
+        # Insert in REVERSE id order with the same explicit created_at, so a
+        # missing ORDER BY id would return them in the wrong order.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO property_logs "
+                    "(id, property_id, field_changed, old_value, new_value, "
+                    "changed_by, created_at) "
+                    "VALUES (:id, :pid, :field, NULL, NULL, 'sistema', :ts)"
+                ),
+                {"id": id_high, "pid": str(prop_id), "field": "high-id", "ts": ts},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO property_logs "
+                    "(id, property_id, field_changed, old_value, new_value, "
+                    "changed_by, created_at) "
+                    "VALUES (:id, :pid, :field, NULL, NULL, 'sistema', :ts)"
+                ),
+                {"id": id_low, "pid": str(prop_id), "field": "low-id", "ts": ts},
+            )
+        entries = log_store.list(property_id=str(prop_id))
+        assert [e.id for e in entries] == [id_low, id_high]
+        assert [e.field_changed for e in entries] == ["low-id", "high-id"]
+    finally:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM properties WHERE reference_code = :r"), {"r": ref}
+            )
+
+
+def test_property_log_store_list_empty_for_property_without_logs(engine):
+    store = PostgresPropertyStore(engine)
+    log_store = PostgresPropertyLogStore(engine)
+    ref = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    try:
+        prop_id = store.create(
+            reference_code=ref,
+            address="Av. Sin Logs 1",
+            property_type="departamento",
+        )
+        assert prop_id is not None
+        assert log_store.list(property_id=str(prop_id)) == []
+    finally:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM properties WHERE reference_code = :r"), {"r": ref}
+            )
+
+
+def test_property_log_store_append_unknown_property_raises(engine):
+    """Appending for a nonexistent property violates the FK and stores nothing."""
+    log_store = PostgresPropertyLogStore(engine)
+    missing = str(uuid.uuid4())
+    with pytest.raises(IntegrityError):
+        log_store.append(
+            property_id=missing,
+            field_changed="status",
+            old_value=None,
+            new_value="reservado",
+        )
+    # The failed append must not persist any row.
+    assert log_store.list(property_id=missing) == []
 
 
 # ---------------------------------------------------------------------------

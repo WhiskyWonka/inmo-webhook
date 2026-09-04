@@ -72,3 +72,33 @@ class TestPropertyLog:
     def test_requires_field_changed(self):
         with pytest.raises(TypeError):
             PropertyLog(id="1", property_id="p1")  # type: ignore[call-arg]
+
+    def test_rejects_empty_field_changed(self):
+        with pytest.raises(ValueError, match="field_changed"):
+            PropertyLog(
+                id="1",
+                property_id="2",
+                field_changed="",
+                old_value=None,
+                new_value=None,
+            )
+
+    def test_rejects_whitespace_only_field_changed(self):
+        with pytest.raises(ValueError, match="field_changed"):
+            PropertyLog(
+                id="1",
+                property_id="2",
+                field_changed="   ",
+                old_value=None,
+                new_value=None,
+            )
+
+    def test_accepts_normal_field_changed(self):
+        log = PropertyLog(
+            id="1",
+            property_id="2",
+            field_changed="status",
+            old_value=None,
+            new_value="reservado",
+        )
+        assert log.field_changed == "status"
