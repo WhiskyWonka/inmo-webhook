@@ -10,7 +10,7 @@
 2. **Dependencies flow downward.** Domain → Storage → Web → Composition. Never import upward.
 3. **No business logic in `main.py`.** It is a thin composition root — wire settings + app + start uvicorn.
 4. **No `importlib.reload` in tests.** Use `Settings` injection. The reload hack is removed.
-5. **DIP is resolved & enforced.** The web layer depends on the `LeadStore` abstraction (`app/storage/base.py`), NOT concrete stores. Do NOT import `LeadLogStore` (or any concrete store) in `web.py` or add new concrete imports there.
+5. **DIP is resolved & enforced.** The web layer depends on the `LeadStore` abstraction (`app/storage/base.py`), NOT concrete stores. Do NOT import `PostgresLeadStore` (or any concrete store) in `web.py` or add new concrete imports there.
 6. **No direct pushes to `main` or `develop`.** Always PR via GitFlow.
 7. **Conventional commits only.** Prefix: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 8. **No AI attribution in commits.** No "Co-Authored-By" lines.
