@@ -1,8 +1,10 @@
 """Integration tests that validate the schema created by ``alembic upgrade head``.
 
-These require a reachable Postgres (DATABASE_URL). They assert the three
-tables exist with the expected columns, that the 19 neighborhoods were seeded,
-and that a properties row can FK to a neighborhoods row.
+These require a reachable Postgres (DATABASE_URL). They assert the tables exist
+with the expected columns, that the 19 neighborhoods were seeded, that a
+properties row can FK to a neighborhoods row, and that the migration's
+updated_at triggers, CHECK constraints, cascade FKs, and server defaults are
+enforced by the migrated schema.
 """
 
 import os
@@ -113,12 +115,14 @@ def test_updated_at_triggers_exist(engine):
         rows = conn.execute(
             text(
                 "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal "
-                "AND tgname IN ('update_properties_updated_at', 'update_leads_updated_at')"
+                "AND tgname IN ('update_properties_updated_at', 'update_leads_updated_at', "
+                "'update_appointments_updated_at')"
             )
         ).fetchall()
     names = {row[0] for row in rows}
     assert "update_properties_updated_at" in names
     assert "update_leads_updated_at" in names
+    assert "update_appointments_updated_at" in names
 
 
 def test_updated_at_trigger_actually_fires(engine):
@@ -220,6 +224,166 @@ def test_on_delete_set_null_fires(engine):
             {"ref": ref},
         )
     assert nid_after is None, "neighborhood deletion did not SET NULL the property FK"
+
+
+def test_appointments_status_check_in_migrated_schema(engine):
+    """The migrated schema pins exactly the 7 Spanish status literals."""
+    with engine.connect() as conn:
+        definition = conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_appointments_status'"
+            )
+        ).scalar_one()
+    for value in (
+        "pendiente",
+        "confirmada",
+        "realizada",
+        "no_show",
+        "cancelada_inquilino",
+        "cancelada_propietario",
+        "reprogramada",
+    ):
+        assert value in definition, f"{value} missing from migrated ck_appointments_status"
+    assert definition.count("'") // 2 == 7, "CHECK must list exactly 7 statuses"
+
+
+def test_appointments_status_check_rejects_invalid_value(engine):
+    """Inserting an appointment with a status outside the 7 Spanish values fails.
+
+    The lead and property rows are created in the same transaction, so the
+    aborted INSERT rolls back everything and leaves no residue.
+    """
+    with engine.begin() as conn:
+        lead_id = conn.execute(
+            text("INSERT INTO leads (phone) VALUES ('+54911CKAPT1') RETURNING id")
+        ).scalar_one()
+        prop_id = conn.execute(
+            text(
+                "INSERT INTO properties (reference_code, address, property_type) "
+                "VALUES ('CK-APT', 'Av. Check 1', 'departamento') RETURNING id"
+            )
+        ).scalar_one()
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                text(
+                    "INSERT INTO appointments (lead_id, property_id, scheduled_at, status) "
+                    "VALUES (:lid, :pid, '2026-09-15 13:00:00', :st)"
+                ),
+                {"lid": lead_id, "pid": prop_id, "st": "vendido"},
+            )
+    # The rejected insert must not persist any row.
+    with engine.connect() as conn:
+        count = conn.execute(text("SELECT count(*) FROM appointments")).scalar_one()
+        assert count == 0
+
+
+def test_appointments_on_delete_cascade_fires(engine):
+    """Deleting a property must cascade-delete its appointments."""
+    with engine.begin() as conn:
+        lead_id = conn.execute(
+            text("INSERT INTO leads (phone) VALUES ('+54911FKCASC1') RETURNING id")
+        ).scalar_one()
+        prop_id = conn.execute(
+            text(
+                "INSERT INTO properties (reference_code, address, property_type) "
+                "VALUES ('FK-CASC', 'Av. Cascada 1', 'departamento') RETURNING id"
+            )
+        ).scalar_one()
+        appt_id = conn.execute(
+            text(
+                "INSERT INTO appointments (lead_id, property_id, scheduled_at) "
+                "VALUES (:lid, :pid, '2026-09-15 10:00:00') RETURNING id"
+            ),
+            {"lid": lead_id, "pid": prop_id},
+        ).scalar_one()
+        conn.execute(text("DELETE FROM properties WHERE id = :pid"), {"pid": prop_id})
+        remaining = conn.execute(
+            text("SELECT count(*) FROM appointments WHERE id = :aid"),
+            {"aid": appt_id},
+        ).scalar_one()
+        conn.execute(text("DELETE FROM leads WHERE id = :lid"), {"lid": lead_id})
+    assert remaining == 0, "property deletion did not CASCADE-delete the appointment"
+
+
+def test_appointments_server_defaults_applied(engine):
+    """Omitting defaulted columns must apply the migration's server defaults."""
+    with engine.begin() as conn:
+        lead_id = conn.execute(
+            text("INSERT INTO leads (phone) VALUES ('+54911DEFAPT1') RETURNING id")
+        ).scalar_one()
+        prop_id = conn.execute(
+            text(
+                "INSERT INTO properties (reference_code, address, property_type) "
+                "VALUES ('DEF-APT', 'Av. Default 1', 'departamento') RETURNING id"
+            )
+        ).scalar_one()
+        appt_id = conn.execute(
+            text(
+                "INSERT INTO appointments (lead_id, property_id, scheduled_at) "
+                "VALUES (:lid, :pid, '2026-09-15 11:00:00') RETURNING id"
+            ),
+            {"lid": lead_id, "pid": prop_id},
+        ).scalar_one()
+        duration, status, r24h, r1h, r15min = conn.execute(
+            text(
+                "SELECT duration_minutes, status, reminder_sent_24h, "
+                "reminder_sent_1h, reminder_sent_15min "
+                "FROM appointments WHERE id = :aid"
+            ),
+            {"aid": appt_id},
+        ).one()
+        conn.execute(text("DELETE FROM appointments WHERE id = :aid"), {"aid": appt_id})
+        conn.execute(text("DELETE FROM leads WHERE id = :lid"), {"lid": lead_id})
+        conn.execute(text("DELETE FROM properties WHERE id = :pid"), {"pid": prop_id})
+    assert duration == 30
+    assert status == "pendiente"
+    assert r24h is False and r1h is False and r15min is False
+
+
+def test_appointments_updated_at_trigger_actually_fires(engine):
+    """UPDATE on appointments must bump updated_at via the trigger.
+
+    ``CURRENT_TIMESTAMP`` is transaction-stable in Postgres (it returns the
+    transaction start time), so the INSERT and the UPDATE must run in separate
+    committed transactions for ``updated_at`` to advance.
+    """
+    with engine.begin() as conn:
+        lead_id = conn.execute(
+            text("INSERT INTO leads (phone) VALUES ('+54911TRIGAPT1') RETURNING id")
+        ).scalar_one()
+        prop_id = conn.execute(
+            text(
+                "INSERT INTO properties (reference_code, address, property_type) "
+                "VALUES ('TRIG-APT', 'Av. Cita Fija 1', 'departamento') RETURNING id"
+            )
+        ).scalar_one()
+        appt_id = conn.execute(
+            text(
+                "INSERT INTO appointments (lead_id, property_id, scheduled_at) "
+                "VALUES (:lid, :pid, '2026-09-15 14:00:00') RETURNING id"
+            ),
+            {"lid": lead_id, "pid": prop_id},
+        ).scalar_one()
+        first = conn.execute(
+            text("SELECT updated_at FROM appointments WHERE id = :aid"),
+            {"aid": appt_id},
+        ).scalar_one()
+    time.sleep(0.05)
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE appointments SET status = 'confirmada' WHERE id = :aid"),
+            {"aid": appt_id},
+        )
+    with engine.begin() as conn:
+        second = conn.execute(
+            text("SELECT updated_at FROM appointments WHERE id = :aid"),
+            {"aid": appt_id},
+        ).scalar_one()
+        conn.execute(text("DELETE FROM appointments WHERE id = :aid"), {"aid": appt_id})
+        conn.execute(text("DELETE FROM leads WHERE id = :lid"), {"lid": lead_id})
+        conn.execute(text("DELETE FROM properties WHERE id = :pid"), {"pid": prop_id})
+    assert second > first, "updated_at did not advance after UPDATE"
 
 
 def test_upgrade_downgrade_roundtrip():

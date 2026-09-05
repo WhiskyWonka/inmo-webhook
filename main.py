@@ -3,6 +3,7 @@ from sqlalchemy import create_engine
 
 from app.config import Settings
 from app.storage.postgres import (
+    PostgresAppointmentStore,
     PostgresLeadStore,
     PostgresNeighborhoodStore,
     PostgresPropertyLogStore,
@@ -21,6 +22,7 @@ _engine = create_engine(settings.database_url)
 store = PostgresLeadStore(_engine)
 neighborhood_store = PostgresNeighborhoodStore(_engine)
 property_log_store = PostgresPropertyLogStore(_engine)
+appointment_store = PostgresAppointmentStore(_engine)
 app = create_app(settings, store)
 
 if __name__ == "__main__":

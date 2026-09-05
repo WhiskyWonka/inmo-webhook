@@ -1,5 +1,5 @@
-"""Unit tests for the SQLAlchemy schema models (properties, leads,
-neighborhoods, messages, property_logs).
+"""Unit tests for the SQLAlchemy schema models (appointments, properties,
+leads, neighborhoods, messages, property_logs).
 
 These tests inspect ``Base.metadata`` directly — no database required. They
 verify that the models declare the expected columns, types, check constraints,
@@ -35,6 +35,7 @@ def _quoted_literal_count(ck: CheckConstraint) -> int:
 
 def test_all_tables_registered_in_base_metadata():
     """Base.metadata must see the model tables."""
+    assert "appointments" in Base.metadata.tables
     assert "neighborhoods" in Base.metadata.tables
     assert "properties" in Base.metadata.tables
     assert "leads" in Base.metadata.tables
@@ -400,3 +401,86 @@ def test_property_logs_indexes():
     assert indexes["ix_property_logs_property_id"] == [table.c.property_id]
     assert "ix_property_logs_created_at" in indexes
     assert indexes["ix_property_logs_created_at"] == [table.c.created_at]
+
+
+# --------------------------------------------------------------------------
+# appointments
+# --------------------------------------------------------------------------
+
+
+def test_appointments_columns_and_types():
+    table = Base.metadata.tables["appointments"]
+    assert isinstance(table.c.id.type, UUID)
+    assert table.c.id.primary_key
+    assert isinstance(table.c.lead_id.type, UUID)
+    assert isinstance(table.c.property_id.type, UUID)
+    assert isinstance(table.c.scheduled_at.type, DateTime)
+    assert isinstance(table.c.duration_minutes.type, Integer)
+    assert isinstance(table.c.status.type, String)
+    assert table.c.status.type.length == 20
+    assert isinstance(table.c.reminder_sent_24h.type, Boolean)
+    assert isinstance(table.c.reminder_sent_1h.type, Boolean)
+    assert isinstance(table.c.reminder_sent_15min.type, Boolean)
+    assert isinstance(table.c.feedback.type, Text)
+    assert isinstance(table.c.interested_after_visit.type, Boolean)
+    assert isinstance(table.c.created_at.type, DateTime)
+    assert isinstance(table.c.updated_at.type, DateTime)
+
+
+def test_appointments_not_null_and_defaults():
+    table = Base.metadata.tables["appointments"]
+    assert table.c.id.server_default.arg.text == "gen_random_uuid()"
+    assert table.c.id.primary_key
+    assert not table.c.lead_id.nullable
+    assert not table.c.property_id.nullable
+    assert not table.c.scheduled_at.nullable
+    assert not table.c.status.nullable
+    assert not table.c.created_at.nullable
+    assert not table.c.updated_at.nullable
+    # duration_minutes is nullable but defaults to 30.
+    assert table.c.duration_minutes.nullable
+    assert table.c.duration_minutes.server_default.arg.text == "30"
+    assert table.c.status.server_default.arg.text == "'pendiente'"
+    # Reminder flags are nullable but default to false.
+    assert table.c.reminder_sent_24h.nullable
+    assert table.c.reminder_sent_1h.nullable
+    assert table.c.reminder_sent_15min.nullable
+    assert table.c.reminder_sent_24h.server_default.arg.text == "false"
+    assert table.c.reminder_sent_1h.server_default.arg.text == "false"
+    assert table.c.reminder_sent_15min.server_default.arg.text == "false"
+    assert table.c.feedback.nullable
+    assert table.c.interested_after_visit.nullable
+    assert table.c.created_at.server_default.arg.text == "CURRENT_TIMESTAMP"
+    assert table.c.updated_at.server_default.arg.text == "CURRENT_TIMESTAMP"
+
+
+def test_appointments_status_check():
+    ck = _check_constraints("appointments")["ck_appointments_status"]
+    assert "pendiente" in ck.sqltext.text
+    assert "confirmada" in ck.sqltext.text
+    assert "realizada" in ck.sqltext.text
+    assert "no_show" in ck.sqltext.text
+    assert "cancelada_inquilino" in ck.sqltext.text
+    assert "cancelada_propietario" in ck.sqltext.text
+    assert "reprogramada" in ck.sqltext.text
+    # Exactly 7 allowed statuses.
+    assert _quoted_literal_count(ck) == 7
+
+
+def test_appointments_foreign_keys_cascade():
+    table = Base.metadata.tables["appointments"]
+    fks = {fk.parent.key: fk for fk in table.foreign_keys}
+    assert len(fks) == 2
+    assert fks["lead_id"].column.table.name == "leads"
+    assert fks["lead_id"].ondelete == "CASCADE"
+    assert fks["property_id"].column.table.name == "properties"
+    assert fks["property_id"].ondelete == "CASCADE"
+
+
+def test_appointments_indexes():
+    table = Base.metadata.tables["appointments"]
+    indexes = {ix.name: list(ix.columns) for ix in table.indexes}
+    assert indexes["ix_appointments_lead_id"] == [table.c.lead_id]
+    assert indexes["ix_appointments_property_id"] == [table.c.property_id]
+    assert indexes["ix_appointments_scheduled_at"] == [table.c.scheduled_at]
+    assert indexes["ix_appointments_status"] == [table.c.status]

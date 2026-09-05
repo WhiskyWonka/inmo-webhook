@@ -1,23 +1,26 @@
 """Integration tests for the Postgres storage adapters.
 
 These exercise ``PostgresLeadStore`` (upsert by phone, message append,
-idempotency via external_id), ``PostgresPropertyStore``, and
-``PostgresPropertyLogStore`` against a reachable Postgres (DATABASE_URL).
-They run in CI.
+idempotency via external_id), ``PostgresPropertyStore``,
+``PostgresPropertyLogStore``, and ``PostgresAppointmentStore`` against a
+reachable Postgres (DATABASE_URL). They run in CI.
 """
 
 import os
 import uuid
+from datetime import datetime
 
 import pytest
 from alembic import command
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
+from app.domain.appointments import Appointment, AppointmentStatus
 from app.domain.messages import Lead, LeadWithMessages, Message
 from app.domain.neighborhoods import Neighborhood, Zone
 from app.domain.properties import PropertyLog
 from app.storage.postgres import (
+    PostgresAppointmentStore,
     PostgresLeadStore,
     PostgresNeighborhoodStore,
     PostgresPropertyLogStore,
@@ -546,3 +549,247 @@ def test_neighborhood_store_list_filters_by_zone(engine):
     assert "Palermo" in norte_names
     assert "Tigre" not in norte_names
     assert all(n.zone == Zone.norte for n in norte)
+
+
+# ---------------------------------------------------------------------------
+# PostgresAppointmentStore
+# ---------------------------------------------------------------------------
+
+
+def test_appointment_store_create_and_find(engine):
+    store = PostgresPropertyStore(engine)
+    lead_store = PostgresLeadStore(engine)
+    appt_store = PostgresAppointmentStore(engine)
+    ref = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    phone = _unique_phone()
+    lead_id = None
+    try:
+        prop_id = store.create(
+            reference_code=ref,
+            address="Av. Cita 100",
+            property_type="departamento",
+        )
+        assert prop_id is not None
+        lead_store.write(
+            LeadWithMessages(lead=Lead(phone=phone, name="Cita Test"), messages=[])
+        )
+        with engine.connect() as conn:
+            lead_id = conn.execute(
+                text("SELECT id FROM leads WHERE phone = :p"), {"p": phone}
+            ).scalar_one()
+        scheduled_at = datetime(2026, 9, 10, 15, 0)
+        appt_id = appt_store.create(
+            lead_id=str(lead_id),
+            property_id=str(prop_id),
+            scheduled_at=scheduled_at,
+        )
+        assert appt_id is not None
+        found = appt_store.find_by_id(str(appt_id))
+        assert found is not None
+        assert isinstance(found, Appointment)
+        assert found.id == str(appt_id)
+        assert found.lead_id == str(lead_id)
+        assert found.property_id == str(prop_id)
+        assert found.scheduled_at == scheduled_at
+        # Server-side defaults are reflected in the read-back domain object.
+        assert found.status == AppointmentStatus.pendiente
+        assert found.duration_minutes == 30
+        assert found.reminder_sent_24h is False
+        assert found.reminder_sent_1h is False
+        assert found.reminder_sent_15min is False
+        assert found.feedback is None
+        assert found.interested_after_visit is None
+    finally:
+        with engine.begin() as conn:
+            if lead_id is not None:
+                conn.execute(
+                    text("DELETE FROM appointments WHERE lead_id = :l"),
+                    {"l": lead_id},
+                )
+            conn.execute(text("DELETE FROM leads WHERE phone = :p"), {"p": phone})
+            conn.execute(
+                text("DELETE FROM properties WHERE reference_code = :r"), {"r": ref}
+            )
+
+
+def test_appointment_store_list_filters(engine):
+    store = PostgresPropertyStore(engine)
+    lead_store = PostgresLeadStore(engine)
+    appt_store = PostgresAppointmentStore(engine)
+    ref_a = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    ref_b = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    phone_a = _unique_phone()
+    phone_b = _unique_phone()
+    lead_a_id = None
+    lead_b_id = None
+    try:
+        prop_a = store.create(
+            reference_code=ref_a,
+            address="Av. Filtro A",
+            property_type="departamento",
+        )
+        prop_b = store.create(
+            reference_code=ref_b,
+            address="Av. Filtro B",
+            property_type="casa",
+        )
+        assert prop_a is not None and prop_b is not None
+        lead_store.write(LeadWithMessages(lead=Lead(phone=phone_a), messages=[]))
+        lead_store.write(LeadWithMessages(lead=Lead(phone=phone_b), messages=[]))
+        with engine.connect() as conn:
+            lead_a_id = conn.execute(
+                text("SELECT id FROM leads WHERE phone = :p"), {"p": phone_a}
+            ).scalar_one()
+            lead_b_id = conn.execute(
+                text("SELECT id FROM leads WHERE phone = :p"), {"p": phone_b}
+            ).scalar_one()
+
+        # lead_a + prop_a, default status (pendiente)
+        appt_a = appt_store.create(
+            lead_id=str(lead_a_id),
+            property_id=str(prop_a),
+            scheduled_at=datetime(2026, 9, 10, 10, 0),
+        )
+        # lead_a + prop_b, confirmada
+        appt_b = appt_store.create(
+            lead_id=str(lead_a_id),
+            property_id=str(prop_b),
+            scheduled_at=datetime(2026, 9, 11, 10, 0),
+            status=AppointmentStatus.confirmada,
+        )
+        # lead_b + prop_a, no_show
+        appt_c = appt_store.create(
+            lead_id=str(lead_b_id),
+            property_id=str(prop_a),
+            scheduled_at=datetime(2026, 9, 12, 10, 0),
+            status=AppointmentStatus.no_show,
+        )
+        ids = {str(appt_a), str(appt_b), str(appt_c)}
+
+        # Unfiltered list returns all three.
+        all_appts = appt_store.list()
+        assert ids <= {a.id for a in all_appts}
+
+        # Status filter.
+        pendientes = appt_store.list(status=AppointmentStatus.pendiente)
+        assert {a.id for a in pendientes} == {str(appt_a)}
+        confirmadas = appt_store.list(status=AppointmentStatus.confirmada)
+        assert {a.id for a in confirmadas} == {str(appt_b)}
+
+        # Lead filter.
+        by_lead_a = appt_store.list(lead_id=str(lead_a_id))
+        assert {a.id for a in by_lead_a} == {str(appt_a), str(appt_b)}
+        # Property filter.
+        by_prop_a = appt_store.list(property_id=str(prop_a))
+        assert {a.id for a in by_prop_a} == {str(appt_a), str(appt_c)}
+        # Combined filters.
+        lead_a_pendientes = appt_store.list(
+            lead_id=str(lead_a_id), status=AppointmentStatus.pendiente
+        )
+        assert {a.id for a in lead_a_pendientes} == {str(appt_a)}
+        lead_a_prop_b = appt_store.list(
+            lead_id=str(lead_a_id), property_id=str(prop_b)
+        )
+        assert {a.id for a in lead_a_prop_b} == {str(appt_b)}
+        no_match = appt_store.list(
+            lead_id=str(lead_b_id), status=AppointmentStatus.confirmada
+        )
+        assert no_match == []
+    finally:
+        with engine.begin() as conn:
+            if lead_a_id is not None:
+                conn.execute(
+                    text("DELETE FROM appointments WHERE lead_id = :l"),
+                    {"l": lead_a_id},
+                )
+            if lead_b_id is not None:
+                conn.execute(
+                    text("DELETE FROM appointments WHERE lead_id = :l"),
+                    {"l": lead_b_id},
+                )
+            conn.execute(text("DELETE FROM leads WHERE phone = :p"), {"p": phone_a})
+            conn.execute(text("DELETE FROM leads WHERE phone = :p"), {"p": phone_b})
+            conn.execute(
+                text("DELETE FROM properties WHERE reference_code IN (:a, :b)"),
+                {"a": ref_a, "b": ref_b},
+            )
+
+
+def test_appointment_store_list_orders_by_scheduled_at_then_id(engine):
+    """Appointments come back ordered by scheduled_at, then id (tiebreaker).
+
+    Rows sharing a scheduled_at must be deterministic: the explicit ids below
+    are inserted in REVERSE id order, so a missing ``ORDER BY id`` would
+    return them in the wrong order.
+    """
+    store = PostgresPropertyStore(engine)
+    lead_store = PostgresLeadStore(engine)
+    appt_store = PostgresAppointmentStore(engine)
+    ref = f"TST-{uuid.uuid4().hex[:6].upper()}"
+    phone = _unique_phone()
+    id_low = "00000000-0000-0000-0000-000000000001"
+    id_high = "00000000-0000-0000-0000-000000000002"
+    ts_tie = "2026-09-11 10:00:00"
+    lead_id = None
+    try:
+        prop_id = store.create(
+            reference_code=ref,
+            address="Av. Orden 1",
+            property_type="departamento",
+        )
+        assert prop_id is not None
+        lead_store.write(LeadWithMessages(lead=Lead(phone=phone), messages=[]))
+        with engine.connect() as conn:
+            lead_id = conn.execute(
+                text("SELECT id FROM leads WHERE phone = :p"), {"p": phone}
+            ).scalar_one()
+        # Earliest appointment created through the store.
+        early_id = appt_store.create(
+            lead_id=str(lead_id),
+            property_id=str(prop_id),
+            scheduled_at=datetime(2026, 9, 10, 9, 0),
+        )
+        # Two appointments sharing scheduled_at, explicit ids in REVERSE order.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO appointments (id, lead_id, property_id, scheduled_at) "
+                    "VALUES (:id, :lid, :pid, :ts)"
+                ),
+                {"id": id_high, "lid": str(lead_id), "pid": str(prop_id), "ts": ts_tie},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO appointments (id, lead_id, property_id, scheduled_at) "
+                    "VALUES (:id, :lid, :pid, :ts)"
+                ),
+                {"id": id_low, "lid": str(lead_id), "pid": str(prop_id), "ts": ts_tie},
+            )
+        appts = appt_store.list(lead_id=str(lead_id))
+        assert [a.id for a in appts] == [str(early_id), id_low, id_high]
+        assert [a.scheduled_at for a in appts] == [
+            datetime(2026, 9, 10, 9, 0),
+            datetime(2026, 9, 11, 10, 0),
+            datetime(2026, 9, 11, 10, 0),
+        ]
+    finally:
+        with engine.begin() as conn:
+            if lead_id is not None:
+                conn.execute(
+                    text("DELETE FROM appointments WHERE lead_id = :l"),
+                    {"l": lead_id},
+                )
+            conn.execute(text("DELETE FROM leads WHERE phone = :p"), {"p": phone})
+            conn.execute(
+                text("DELETE FROM properties WHERE reference_code = :r"), {"r": ref}
+            )
+
+
+def test_appointment_store_find_missing_returns_none(engine):
+    appt_store = PostgresAppointmentStore(engine)
+    assert appt_store.find_by_id(str(uuid.uuid4())) is None
+
+
+def test_appointment_store_list_empty_for_unknown_lead(engine):
+    appt_store = PostgresAppointmentStore(engine)
+    assert appt_store.list(lead_id=str(uuid.uuid4())) == []
